@@ -309,4 +309,5 @@ Rozważany system: flota hulajnóg + płatności za hulajnogi (pozostałe usług
 
  Weryfikacja: uruchomienie `pytest` (7 testów), ręczny eksperyment z restartem na `uvicorn`, przeczytanie i zrozumienie całego kodu przez obu autorów.
 
-Przed oddaniem: sprawdź instalację w nowym środowisku wirtualnym oraz kompletność README. Nie dołączaj `.venv`, cache Pythona (`__pycache__`) ani sekretów.
+
+
