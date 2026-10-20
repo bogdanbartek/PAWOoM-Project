@@ -1,0 +1,1 @@
+"""Student starter application."""
