@@ -1,0 +1,49 @@
+server:
+  # Tylko interfejs lokalny - bramka nie jest wystawiana na zewnątrz.
+  address: ${SERVER_ADDRESS:127.0.0.1}
+  port: ${GATEWAY_PORT:8080}
+
+spring:
+  application:
+    name: api-gateway
+  cloud:
+    gateway:
+      server:
+        webflux:
+          discovery:
+            locator:
+              # Tylko jawne trasy poniżej - bez automatycznych tras dla każdej usługi z Eureki.
+              enabled: false
+          httpclient:
+            # 1 s na nawiązanie połączenia z instancją usługi.
+            connect-timeout: 1000
+            # 5 s na odpowiedź: więcej niż timeout 3 s wywołania PAYMENT -> SCOOTER z LAB3,
+            # dzięki czemu kontrolowane 503 z Payment Service zdąży wrócić do klienta.
+            response-timeout: 5s
+          default-filters:
+            - AddResponseHeader=X-Gateway, lab4
+          routes:
+            # Usługa 1: flota hulajnóg (SQLite + Redis, reguła rent/return).
+            # /api/scooters/1/rent -> StripPrefix=1 -> /scooters/1/rent w SCOOTER-SERVICE
+            - id: scooters
+              uri: lb://SCOOTER-SERVICE
+              predicates:
+                - Path=/api/scooters,/api/scooters/**
+              filters:
+                - StripPrefix=1
+            # Usługa 2: płatności (wywołuje SCOOTER-SERVICE przez Eurekę - przepływ z LAB3).
+            # /api/payments/1/details -> StripPrefix=1 -> /payments/1/details w PAYMENT-SERVICE
+            - id: payments
+              uri: lb://PAYMENT-SERVICE
+              predicates:
+                - Path=/api/payments,/api/payments/**
+              filters:
+                - StripPrefix=1
+
+eureka:
+  client:
+    # Bramka tylko pobiera rejestr (lb://...), sama się w nim nie rejestruje.
+    register-with-eureka: false
+    fetch-registry: true
+    service-url:
+      defaultZone: ${GATEWAY_EUREKA_URL:http://127.0.0.1:8761/eureka/}

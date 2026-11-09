@@ -1,0 +1,6 @@
+services:
+  eureka:
+    build:
+      context: ./eureka-server
+    ports:
+      - "127.0.0.1:8761:8761"
