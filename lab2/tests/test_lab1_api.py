@@ -1,17 +1,10 @@
-import pytest
-from fastapi.testclient import TestClient
+"""Testy z LAB1 - bez zmian w asercjach.
 
-from app.main import create_app
-
+Fixture `client` (tests/conftest.py) daje teraz świeżą bazę SQLite w tmp_path
+i pusty zamiennik Redis, więc każdy test nadal zaczyna od pustego stanu.
+"""
 
 SCOOTER = {"id": 1, "name": "Hulajnoga 1", "model": "Xiaomi Mi 4 Pro"}
-
-
-@pytest.fixture
-def client():
-    # Świeża aplikacja i magazyn przy każdym teście.
-    with TestClient(create_app()) as test_client:
-        yield test_client
 
 
 def test_health(client):

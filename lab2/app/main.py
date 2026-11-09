@@ -1,122 +1,157 @@
-from typing import Literal
+import logging
+import os
+from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel, Field
+from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
+from redis.exceptions import RedisError
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+
+from app.cache import JsonCache, make_redis
+from app.database import Base, make_database
+from app.db_models import ScooterRow  # noqa: F401 - rejestruje tabelę w Base.metadata
+from app.models import Scooter, ScooterCreate
+from app.repository import (
+    DuplicateScooterError,
+    ScooterNotFoundError,
+    ScooterRepository,
+    ScooterStateError,
+)
+
+SERVICE_NAME = "Scooter Rental Service"
+DEFAULT_DATABASE_URL = "sqlite:///./app.db"
+DEFAULT_REDIS_URL = "redis://localhost:6379/0"
+DEFAULT_CACHE_TTL_SECONDS = 60
+
+logger = logging.getLogger(__name__)
 
 
-ScooterStatus = Literal["available", "rented", "maintenance"]
+def create_app(database_url: str | None = None, redis_client=None) -> FastAPI:
+    """Fabryka aplikacji.
 
+    Parametry pozwalają testom podać bazę w `tmp_path` i zamiennik Redis.
+    Bez parametrów konfiguracja pochodzi ze zmiennych środowiskowych.
+    """
 
-class ScooterCreate(BaseModel):
-    id: int = Field(gt=0)
-    name: str = Field(min_length=1, max_length=100)
-    model: str = Field(min_length=1, max_length=100)
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        # CACHE_PREFIX musi być ustawiony przed startem - bez niego nie wiadomo,
+        # do kogo należą klucze na (potencjalnie wspólnym) serwerze Redis.
+        prefix = os.environ.get("CACHE_PREFIX")
+        if not prefix:
+            raise RuntimeError("CACHE_PREFIX environment variable must be set before start")
+        ttl = int(os.getenv("CACHE_TTL_SECONDS", str(DEFAULT_CACHE_TTL_SECONDS)))
 
+        url = database_url or os.getenv("DATABASE_URL", DEFAULT_DATABASE_URL)
+        engine, sessions = make_database(url)
+        # create_all tworzy brakujące tabele, nie kasuje danych i nie migruje kolumn.
+        Base.metadata.create_all(engine)
 
-class Scooter(BaseModel):
-    id: int
-    name: str
-    model: str
-    status: ScooterStatus = "available"
+        client = redis_client if redis_client is not None else make_redis(
+            os.getenv("REDIS_URL", DEFAULT_REDIS_URL)
+        )
 
+        app.state.engine = engine
+        app.state.redis = client
+        app.state.repository = ScooterRepository(sessions)
+        app.state.cache = JsonCache(client, prefix=prefix, ttl=ttl, resource_name="scooter")
+        try:
+            yield
+        finally:
+            client.close()
+            engine.dispose()
 
-def create_app() -> FastAPI:
     app = FastAPI(
-        title="Scooter Rental Service",
+        title=SERVICE_NAME,
         description="Student microservice for scooter rentals",
-        version="0.1.0",
+        version="0.2.0",
+        lifespan=lifespan,
     )
-
-    # Każda instancja aplikacji ma własny magazyn w pamięci.
-    # Zastąp "items" nazwą wynikającą z twojej domeny.
-    app.state.scooters = {}
 
     @app.get("/health")
     def health() -> dict[str, str]:
-        return {"status": "ok", "service": "Scooter Rental Service"}
+        return {"status": "ok", "service": SERVICE_NAME}
+
+    @app.get("/ready")
+    def ready(request: Request):
+        """Rozszerzenie LAB2: gotowość zależności (baza wymagana, cache opcjonalny)."""
+        try:
+            with request.app.state.engine.connect() as connection:
+                connection.execute(text("SELECT 1"))
+        except SQLAlchemyError:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "error", "service": SERVICE_NAME, "database": "down", "cache": "unknown"},
+            )
+        try:
+            request.app.state.redis.ping()
+            cache_state = "up"
+        except RedisError:
+            cache_state = "down"
+        return {
+            "status": "ok" if cache_state == "up" else "degraded",
+            "service": SERVICE_NAME,
+            "database": "up",
+            "cache": cache_state,
+        }
 
     @app.get("/scooters", response_model=list[Scooter])
     def list_scooters(request: Request) -> list[Scooter]:
-        return list(request.app.state.scooters.values())
+        return request.app.state.repository.list_all()
 
     @app.get("/scooters/{scooter_id}", response_model=Scooter)
-    def get_scooter(scooter_id: int, request: Request) -> Scooter:
-        scooter = request.app.state.scooters.get(scooter_id)
+    def get_scooter(scooter_id: int, request: Request, response: Response) -> Scooter:
+        """Cache-aside: najpierw Redis, przy MISS baza i zapis kopii z TTL."""
+        cache: JsonCache = request.app.state.cache
+        cached, source = cache.get(scooter_id)
+        if cached is not None:
+            response.headers["X-Cache"] = source  # HIT
+            return Scooter.model_validate(cached)
 
-        if scooter is None:
+        try:
+            scooter = request.app.state.repository.get(scooter_id)
+        except ScooterNotFoundError:
+            # Odpowiedzi 404 nie zapisujemy w cache.
             raise HTTPException(status_code=404, detail="Scooter not found")
 
+        if source != "BYPASS" and not cache.put(scooter_id, scooter.model_dump(mode="json")):
+            source = "BYPASS"  # Redis padł między GET a SET
+        response.headers["X-Cache"] = source
         return scooter
 
     @app.post("/scooters", response_model=Scooter, status_code=201)
     def create_scooter(data: ScooterCreate, request: Request) -> Scooter:
-        scooters = request.app.state.scooters
-
-        if data.id in scooters:
-            raise HTTPException(
-                status_code=409,
-                detail="Scooter with this ID already exists",
-            )
-
-        scooter = Scooter(**data.model_dump())
-        scooters[scooter.id] = scooter
-
-        return scooter
+        try:
+            return request.app.state.repository.create(data)
+        except DuplicateScooterError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
 
     @app.post("/scooters/{scooter_id}/rent", response_model=Scooter)
     def rent_scooter(scooter_id: int, request: Request) -> Scooter:
-        scooters = request.app.state.scooters
-        scooter = scooters.get(scooter_id)
-
-        if scooter is None:
-            raise HTTPException(status_code=404, detail="Scooter not found")
-
-        # Reguła biznesowa: można wypożyczyć tylko dostępny skuter.
-        if scooter.status != "available":
-            raise HTTPException(
-                status_code=409,
-                detail="Scooter is not available for rental",
-            )
-
-        updated = scooter.model_copy(update={"status": "rented"})
-        scooters[scooter_id] = updated
-
-        return updated
+        return _change_status(request, scooter_id, request.app.state.repository.rent)
 
     @app.post("/scooters/{scooter_id}/return", response_model=Scooter)
     def return_scooter(scooter_id: int, request: Request) -> Scooter:
-        scooters = request.app.state.scooters
-        scooter = scooters.get(scooter_id)
+        return _change_status(request, scooter_id, request.app.state.repository.return_scooter)
 
-        if scooter is None:
-            raise HTTPException(status_code=404, detail="Scooter not found")
-
-        # Nie można zwrócić skutera, który nie jest wypożyczony.
-        if scooter.status != "rented":
-            raise HTTPException(
-                status_code=409,
-                detail="Scooter is not currently rented",
-            )
-
-        updated = scooter.model_copy(update={"status": "available"})
-        scooters[scooter_id] = updated
-
-        return updated
-
-    # TODO: dodaj tutaj modele/endpointy własnej domeny lub dołącz routery.
-    # Magazyn twórz tylko raz na aplikację; endpointy korzystają z app.state.
     return app
 
 
+def _change_status(request: Request, scooter_id: int, operation) -> Scooter:
+    try:
+        scooter = operation(scooter_id)  # commit w bazie
+    except ScooterNotFoundError:
+        raise HTTPException(status_code=404, detail="Scooter not found")
+    except ScooterStateError as exc:
+        # Reguła odrzuciła operację: transakcja wycofana, cache nietknięty.
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    # Dopiero PO commicie unieważniamy kopię w cache. Błąd Redis nie cofa zapisu
+    # w bazie - stara wartość może wtedy przetrwać najdłużej do końca TTL.
+    if not request.app.state.cache.delete(scooter_id):
+        logger.warning("Cache invalidation failed for scooter %s", scooter_id)
+    return scooter
+
+
 app = create_app()
-
-
-# TODO:
-# 1. Choose your domain and name the service.
-# 2. Add your domain models.
-# 3. Add one list endpoint and one detail endpoint.
-# 4. Add one create or update endpoint.
-# 5. Add a business rule beyond types, required fields and unique identifiers.
-# 6. Reject invalid operations before changing state; handle 404, 409 and 422.
-# 7. Add at least three domain tests with fresh application state for each test.
-# 8. Verify write/read and restart via HTTP; complete the README.
