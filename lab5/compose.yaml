@@ -1,0 +1,18 @@
+# Tylko infrastruktura: rejestr Eureka (LAB3) i broker RabbitMQ (LAB5).
+# Usługi Python i bramka uruchamiane są lokalnie (poza zakresem: wszystko w jednym Compose).
+services:
+  eureka:
+    build:
+      context: ./eureka-server
+    ports:
+      - "127.0.0.1:8761:8761"
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: lab5-rabbitmq
+    ports:
+      - "127.0.0.1:5672:5672"     # AMQP 0-9-1
+      - "127.0.0.1:15672:15672"   # panel Management (guest/guest)
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
