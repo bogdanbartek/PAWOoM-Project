@@ -1,0 +1,364 @@
+=====================================================================
+ LAB5 - RĘCZNE URUCHOMIENIE KROK PO KROKU (bez skryptu)
+=====================================================================
+
+Po co ten plik: skrypt start-lab5.ps1 robi dokładnie to, co jest opisane
+poniżej. Tu masz to samo, ale rozpisane na kroki, z wyjaśnieniem CO robi
+każdy krok i DLACZEGO w tej kolejności. Dzięki temu, gdy coś padnie,
+wiesz, w którym miejscu szukać.
+
+Wszystkie ścieżki zakładają repozytorium w:
+    C:\Users\oscar\Desktop\PAWOoM-Project
+
+Potrzebujesz 6 konsol PowerShell (każdy serwer blokuje swoją konsolę):
+
+    Konsola A  - infrastruktura (Docker) - polecenia kończą się od razu
+    Konsola 1  - Scooter Service      (port 8101)
+    Konsola 2  - Insurance Service    (port 8103)
+    Konsola 3  - Payment Service      (port 8102)
+    Konsola 4  - Maintenance Service  (port 8104)
+    Konsola 5  - Bramka (Java)        (port 8080)
+
+    (Konsola A po wykonaniu poleceń może posłużyć jako 6. konsola
+     na polecenia curl.)
+
+
+---------------------------------------------------------------------
+ CZĘŚĆ 0. Jak to wszystko do siebie pasuje (przeczytaj raz)
+---------------------------------------------------------------------
+
+  Redis    (6379)  - cache dla usługi floty
+  Eureka   (8761)  - książka telefoniczna: usługi się w niej rejestrują
+                     i znajdują po NAZWIE (SCOOTER-SERVICE itd.)
+  RabbitMQ (5672)  - skrzynka pocztowa na zdarzenia (panel: 15672)
+  Scooter  (8101)  - flota hulajnóg (SQLite + Redis), odbiera zdarzenia
+  Insurance(8103)  - ubezpieczenia, odbiera zdarzenia
+  Payment  (8102)  - płatności, WYSYŁA zdarzenie po opłaceniu
+  Maintenance(8104)- zlecenia serwisowe
+  Bramka   (8080)  - jedyne wejście dla klienta (/api/...)
+
+Każda usługa to osobny proces, więc każda MUSI mieć własny port.
+Zmienne środowiskowe ustawiasz W KAŻDEJ KONSOLI OSOBNO - nie przenoszą
+się między oknami. Zamknięcie konsoli / Ctrl+C zatrzymuje proces.
+
+
+---------------------------------------------------------------------
+ CZĘŚĆ 1. Jednorazowe przygotowanie (zwykle już zrobione)
+---------------------------------------------------------------------
+
+1.1 Docker Desktop musi być WŁĄCZONY (ikona wieloryba, "running").
+    Sprawdź:   docker info
+    Jeśli wypisze błąd połączenia z demonem - Docker jeszcze nie wstał.
+
+1.2 Środowiska Pythona (.venv). Każda usługa ma WŁASNE, bo mają różne
+    zależności. Tworzy się je raz, w katalogu usługi:
+
+        cd C:\Users\oscar\Desktop\PAWOoM-Project\lab5\scooter-service
+        py -m venv .venv
+        .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+
+    To samo w: insurance-service, payment-service, maintenance-service.
+    (Testy integracyjne mają własne w lab5\tests - też z requirements.txt.)
+
+    Nie trzeba "aktywować" środowiska. Uruchamiamy zawsze przez pełną
+    ścieżkę .\.venv\Scripts\python.exe - wtedy na pewno używa się
+    właściwych bibliotek.
+
+1.3 Java 21 i Maven są rozpakowane w C:\Users\oscar\tools\
+    (jdk-21.0.13+9 oraz apache-maven-3.9.11). Nie ma instalatora, więc
+    w konsoli bramki trzeba je dodać do PATH (patrz krok 6).
+
+1.4 Bramka musi być zbudowana (powstaje plik gateway\target\api-gateway.jar).
+    Robi się to raz oraz PO KAŻDEJ ZMIANIE application.yml bramki:
+
+        cd C:\Users\oscar\Desktop\PAWOoM-Project\lab5\gateway
+        $env:JAVA_HOME = 'C:\Users\oscar\tools\jdk-21.0.13+9'
+        $env:Path = "$env:JAVA_HOME\bin;C:\Users\oscar\tools\apache-maven-3.9.11\bin;$env:Path"
+        mvn package -DskipTests
+
+    Gdy bramka "nie zna" nowych tras (np. /api/jobs) - zwykle to stary jar.
+
+
+---------------------------------------------------------------------
+ KROK 1 (Konsola A). Infrastruktura: Redis, Eureka, RabbitMQ
+---------------------------------------------------------------------
+
+    cd C:\Users\oscar\Desktop\PAWOoM-Project\lab5
+    docker start lab5
+    docker compose up -d --build
+
+CO TO ROBI:
+  - "docker start lab5" włącza Twój kontener z Redisem (nazywa się lab5).
+    Gdyby go nie było (nowy komputer), utwórz:
+        docker run -d --name lab5 -p 127.0.0.1:6379:6379 redis:7-alpine
+  - "docker compose up -d --build" czyta lab5\compose.yaml i uruchamia
+    w tle DWA kontenery: Eurekę (buduje ją z folderu eureka-server)
+    oraz RabbitMQ. "-d" = w tle, "--build" = zbuduj obraz, jeśli trzeba.
+
+SPRAWDŹ:
+    docker ps
+  powinny być 3 kontenery: lab5, lab5-eureka-1, lab5-rabbitmq.
+  Przeglądarka:  http://localhost:8761    (panel Eureki, jeszcze pusty)
+                 http://localhost:15672   (RabbitMQ, login guest / guest)
+
+  Eureka i RabbitMQ potrzebują kilkunastu sekund na start. Jeśli strona
+  jeszcze nie działa, poczekaj i odśwież.
+
+
+---------------------------------------------------------------------
+ KROK 2 (Konsola 1). Scooter Service - ZAWSZE PIERWSZY
+---------------------------------------------------------------------
+
+    cd C:\Users\oscar\Desktop\PAWOoM-Project\lab5\scooter-service
+
+    $env:EUREKA_SERVER_URL = 'http://127.0.0.1:8761'
+    $env:SERVICE_NAME      = 'SCOOTER-SERVICE'
+    $env:SERVICE_PORT      = '8101'
+    $env:INSTANCE_IP       = '127.0.0.1'
+    $env:INSTANCE_HOST     = 'localhost'
+    $env:DATABASE_URL      = 'sqlite:///./app.db'
+    $env:REDIS_URL         = 'redis://localhost:6379/0'
+    $env:CACHE_PREFIX      = 'lab5:131409:scooter-service'
+    $env:RABBITMQ_URL      = 'amqp://guest:guest@127.0.0.1:5672/%2F'
+
+    .\.venv\Scripts\python.exe -m uvicorn app.main:app --port 8101
+
+CO OZNACZAJĄ ZMIENNE:
+  EUREKA_SERVER_URL  gdzie jest Eureka, do której się zarejestruję
+                     (adres BEZ końcówki /eureka - ta jest w kodzie)
+  SERVICE_NAME       nazwa logiczna w Eurece (po niej inni mnie znajdą)
+  SERVICE_PORT       port, który ogłaszam w Eurece. MUSI być taki sam
+                     jak --port w uvicornie! Inaczej Eureka poda innym
+                     usługom zły adres i dostaną 503.
+  INSTANCE_IP/HOST   adres, pod którym inni mogą mnie wywołać
+                     (nigdy 0.0.0.0)
+  DATABASE_URL       plik bazy SQLite. "./app.db" jest liczone od katalogu,
+                     z którego uruchamiasz - dlatego odpalaj z folderu
+                     scooter-service (powstanie scooter-service\app.db)
+  REDIS_URL          adres Redisa
+  CACHE_PREFIX       prefiks kluczy w Redisie. JEDYNA zmienna WYMAGANA:
+                     bez niej usługa nie wystartuje (RuntimeError:
+                     "CACHE_PREFIX environment variable must be set")
+  RABBITMQ_URL       adres brokera
+
+  (Większość zmiennych ma domyślne wartości w kodzie, więc usługa
+   ruszyłaby też z samym CACHE_PREFIX. Ustawiamy je jawnie, żeby było
+   widać, co jest skonfigurowane.)
+
+DLACZEGO PIERWSZY: przy starcie usługa TWORZY w RabbitMQ swoją kolejkę
+  scooter.payment-events i wiąże ją z kluczem payment.completed. Kolejka
+  musi istnieć, ZANIM ktokolwiek opublikuje zdarzenie - inaczej RabbitMQ
+  odrzuci wiadomość (nie ma dokąd jej skierować).
+
+SPRAWDŹ (w innej konsoli, np. A):
+    curl.exe http://127.0.0.1:8101/health
+  -> {"status":"ok","service":"Scooter Rental Service"}
+  W logu konsoli 1 ma być: "Application startup complete".
+  W panelu Eureki po chwili pojawi się SCOOTER-SERVICE.
+
+
+---------------------------------------------------------------------
+ KROK 3 (Konsola 2). Insurance Service - PRZED Payment
+---------------------------------------------------------------------
+
+    cd C:\Users\oscar\Desktop\PAWOoM-Project\lab5\insurance-service
+
+    $env:EUREKA_SERVER_URL = 'http://127.0.0.1:8761'
+    $env:SERVICE_NAME      = 'INSURANCE-SERVICE'
+    $env:SERVICE_PORT      = '8103'
+    $env:INSTANCE_IP       = '127.0.0.1'
+    $env:INSTANCE_HOST     = 'localhost'
+    $env:RABBITMQ_URL      = 'amqp://guest:guest@127.0.0.1:5672/%2F'
+
+    .\.venv\Scripts\python.exe -m uvicorn app.main:app --port 8103
+
+DLACZEGO PRZED PAYMENT: ta usługa też tworzy swoją kolejkę
+  (insurance.payment-events). Gdyby Payment opublikował zdarzenie, zanim
+  Insurance choć raz wystartuje, ta kolejka by nie istniała i ubezpieczenia
+  nigdy tego zdarzenia nie dostaną.
+  Nie potrzebuje zmiennych bazy ani Redisa - trzyma dane w pamięci.
+
+SPRAWDŹ:   curl.exe http://127.0.0.1:8103/health
+
+
+---------------------------------------------------------------------
+ KROK 4 (Konsola 3). Payment Service
+---------------------------------------------------------------------
+
+    cd C:\Users\oscar\Desktop\PAWOoM-Project\lab5\payment-service
+
+    $env:EUREKA_SERVER_URL = 'http://127.0.0.1:8761'
+    $env:SERVICE_NAME      = 'PAYMENT-SERVICE'
+    $env:SERVICE_PORT      = '8102'
+    $env:INSTANCE_IP       = '127.0.0.1'
+    $env:INSTANCE_HOST     = 'localhost'
+    $env:RABBITMQ_URL      = 'amqp://guest:guest@127.0.0.1:5672/%2F'
+
+    .\.venv\Scripts\python.exe -m uvicorn app.main:app --port 8102
+
+To PRODUCENT zdarzeń: po POST /payments/{id}/pay wysyła PaymentCompleted
+do RabbitMQ. Nie zna konsumentów ani ich kolejek - zna tylko exchange
+(pawoom.events) i klucz (payment.completed).
+
+SPRAWDŹ:   curl.exe http://127.0.0.1:8102/health
+
+
+---------------------------------------------------------------------
+ KROK 5 (Konsola 4). Maintenance Service
+---------------------------------------------------------------------
+
+    cd C:\Users\oscar\Desktop\PAWOoM-Project\lab5\maintenance-service
+
+    $env:EUREKA_SERVER_URL = 'http://127.0.0.1:8761'
+    $env:SERVICE_NAME      = 'MAINTENANCE-SERVICE'
+    $env:SERVICE_PORT      = '8104'
+    $env:INSTANCE_IP       = '127.0.0.1'
+    $env:INSTANCE_HOST     = 'localhost'
+
+    .\.venv\Scripts\python.exe -m uvicorn app.main:app --port 8104
+
+Nie używa RabbitMQ (nie wysyła ani nie odbiera zdarzeń), więc bez
+RABBITMQ_URL.
+
+SPRAWDŹ:   curl.exe http://127.0.0.1:8104/health
+
+
+---------------------------------------------------------------------
+ KROK 6 (Konsola 5). Bramka - NA KOŃCU
+---------------------------------------------------------------------
+
+    cd C:\Users\oscar\Desktop\PAWOoM-Project\lab5\gateway
+    $env:JAVA_HOME = 'C:\Users\oscar\tools\jdk-21.0.13+9'
+    $env:Path = "$env:JAVA_HOME\bin;C:\Users\oscar\tools\apache-maven-3.9.11\bin;$env:Path"
+
+    java -jar target\api-gateway.jar
+
+  Alternatywnie (kompiluje i uruchamia, wolniej):   mvn spring-boot:run
+
+CO TO ROBI: uruchamia bramkę na :8080. Czyta trasy z
+  src\main\resources\application.yml. Bramka NIE rejestruje się w Eurece,
+  tylko z niej pobiera listę usług (adresy "lb://NAZWA").
+
+  Dlaczego na końcu: bramka przy starcie pobiera rejestr z Eureki. Gdy
+  usługi są już zarejestrowane, szybciej je zobaczy.
+
+SPRAWDŹ:   curl.exe http://127.0.0.1:8080/health
+  -> {"service":"API-GATEWAY","status":"ok"}
+  (to własny endpoint bramki, nie usług)
+
+
+---------------------------------------------------------------------
+ KROK 7. POCZEKAJ ok. minuty, potem sprawdź trasy
+---------------------------------------------------------------------
+
+Nowa usługa zarejestrowana w Eurece NIE jest od razu widoczna dla bramki
+- bramka odświeża swoją kopię rejestru co ok. 30 s, a sama Eureka
+dodatkowo trzyma odpowiedzi w cache ok. 30 s. Dlatego tuż po starcie
+dostaniesz 503. To normalne.
+
+Sprawdź każdą trasę przez bramkę (wszystkie mają dać 200):
+
+    curl.exe -s -o NUL -w "%{http_code}`n" http://127.0.0.1:8080/api/scooters
+    curl.exe -s -o NUL -w "%{http_code}`n" http://127.0.0.1:8080/api/payments
+    curl.exe -s -o NUL -w "%{http_code}`n" http://127.0.0.1:8080/api/insurances
+    curl.exe -s -o NUL -w "%{http_code}`n" http://127.0.0.1:8080/api/jobs
+
+Panel Eureki (http://localhost:8761) powinien pokazywać cztery wpisy UP:
+SCOOTER-SERVICE, PAYMENT-SERVICE, INSURANCE-SERVICE, MAINTENANCE-SERVICE.
+
+GOTOWE. Dalej pokaz: patrz POKAZ.md (od sekcji 3).
+
+
+---------------------------------------------------------------------
+ ZATRZYMANIE (ręcznie)
+---------------------------------------------------------------------
+
+  1. W konsolach 5, 3, 2, 1, 4:  Ctrl+C
+     (kolejność: najpierw bramka, potem usługi). Ctrl+C robi POPRAWNE
+     zamknięcie - usługa wyrejestrowuje się z Eureki. Samo zamknięcie
+     okna konsoli zostawia wpis w Eurece na ok. 90 s ("martwy adres").
+  2. W konsoli A:
+         cd C:\Users\oscar\Desktop\PAWOoM-Project\lab5
+         docker compose down        (Eureka + RabbitMQ; kolejki znikają)
+         docker stop lab5           (Redis - opcjonalnie)
+  3. Reset danych: zatrzymaj Scooter Service i usuń plik
+         lab5\scooter-service\app.db
+     (Payment, Insurance i Maintenance trzymają dane w pamięci - znikają
+      po zatrzymaniu.)
+
+  Zwolnienie portów jest ważne przed uruchomieniem innego laba, bo
+  laby 3, 4 i 5 używają tych samych portów (8101, 8102, 8761, 8080).
+
+
+---------------------------------------------------------------------
+ JAK TO MA SIĘ DO SKRYPTU
+---------------------------------------------------------------------
+
+  start-lab5.ps1  =  KROK 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7, tyle że
+                     procesy startują w tle (bez okien), a logi
+                     lądują w %TEMP%\lab5-logs.
+  stop-lab5.ps1   =  zatrzymanie procesów na portach 8080/8101-8104
+                     + docker compose down.
+
+
+---------------------------------------------------------------------
+ DIAGNOSTYKA - przydatne polecenia
+---------------------------------------------------------------------
+
+Co słucha na portach LAB5:
+    Get-NetTCPConnection -State Listen -LocalPort 8080,8101,8102,8103,8104,8761,5672 |
+        Select-Object LocalPort, OwningProcess | Sort-Object LocalPort
+
+Co widzi Eureka (nazwa -> adres, status):
+    curl.exe -s -H "Accept: application/json" http://127.0.0.1:8761/eureka/apps
+
+Kolejki RabbitMQ (ile wiadomości czeka):
+    docker exec lab5-rabbitmq rabbitmqctl list_queues name messages_ready messages_unacknowledged
+
+Kontenery:
+    docker ps
+
+Zabicie procesu zajmującego port (np. 8101):
+    Get-NetTCPConnection -State Listen -LocalPort 8101 |
+        ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
+
+Wywołanie usługi BEZPOŚREDNIO (z pominięciem bramki i Eureki) - dobre do
+sprawdzenia, czy problem jest w usłudze, czy w routingu:
+    curl.exe -i http://127.0.0.1:8101/scooters
+
+
+---------------------------------------------------------------------
+ NAJCZĘSTSZE PROBLEMY
+---------------------------------------------------------------------
+
+Usługa nie startuje: "CACHE_PREFIX environment variable must be set"
+    -> nie ustawiłeś $env:CACHE_PREFIX w TEJ konsoli (Scooter Service).
+
+"error while attempting to bind ... port" / port zajęty
+    -> stary proces nadal działa. Zabij go (polecenie wyżej) albo
+       .\scripts\stop-lab5.ps1.
+
+503 z bramki zaraz po starcie
+    -> rejestr jeszcze się odświeża. Poczekaj ok. minuty.
+
+503 z bramki długo po starcie dla jednej usługi
+    -> sprawdź w Eurece, czy ta usługa tam jest i na jakim porcie.
+       Częsta przyczyna: SERVICE_PORT różny od --port.
+    -> sprawdź w jej konsoli, czy nie ma błędu przy starcie.
+
+500 z bramki po zabiciu usługi
+    -> bramka ma w kopii rejestru stary adres (do ok. 90 s).
+
+409 przy tworzeniu hulajnogi/płatności
+    -> takie id już istnieje. Zmień id albo zrób reset bazy.
+
+pay zwraca 503 "RabbitMQ broker is unavailable"
+    -> RabbitMQ nie działa (docker ps) albo zły RABBITMQ_URL.
+
+Po pay nic się nie zmienia w statystykach
+    -> to normalne: konsument działa na żądanie. Wywołaj
+       POST /api/scooters/payment-events/consume
+       (i /api/insurances/payment-events/consume).
+
+Bramka zwraca 404 bez nagłówka X-Gateway dla nowej trasy
+    -> stary jar bramki. Przebuduj (krok 1.4) i uruchom ponownie.

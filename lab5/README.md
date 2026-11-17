@@ -1,13 +1,15 @@
 # Scooter Rental System — LAB5
 
-System wypożyczalni hulajnóg elektrycznych: dwa mikroserwisy FastAPI za bramką API Gateway, połączone synchronicznie (HTTP przez Eurekę) i asynchronicznie (RabbitMQ).
+System wypożyczalni hulajnóg elektrycznych: cztery mikroserwisy FastAPI za bramką API Gateway, połączone synchronicznie (HTTP przez Eurekę) i asynchronicznie (RabbitMQ).
 
-- **API Gateway** (`gateway/`, port **8080**) — jedno wejście dla klienta, trasy `/api/scooters/**` i `/api/payments/**` (LAB4),
+- **API Gateway** (`gateway/`, port **8080**) — jedno wejście dla klienta, trasy `/api/scooters/**`, `/api/payments/**` (LAB4) oraz `/api/insurances/**`, `/api/coverage/**`, `/api/jobs/**` (usługi 3 i 4),
 - **Scooter Rental Service** (`scooter-service/`, `SCOOTER-SERVICE`, port 8101) — flota hulajnóg, SQLite i cache Redis (LAB1–LAB2), **konsument zdarzeń `PaymentCompleted`** (LAB5),
 - **Payment Service** (`payment-service/`, `PAYMENT-SERVICE`, port 8102) — płatności, synchroniczne sprawdzenie hulajnogi (LAB3), **producent zdarzeń `PaymentCompleted`** (LAB5),
+- **Insurance Service** (`insurance-service/`, `INSURANCE-SERVICE`, port 8103) — polisy i automatyczne pokrycie ubezpieczeniowe, **drugi konsument zdarzeń `PaymentCompleted`** (sekcja 34),
+- **Maintenance Service** (`maintenance-service/`, `MAINTENANCE-SERVICE`, port 8104) — zlecenia serwisowe z maszyną stanów (sekcja 34),
 - **Eureka Server** (port 8761) i **RabbitMQ** (porty 5672 i 15672) — infrastruktura w `compose.yaml`.
 
-Pełna instrukcja uruchomienia jest w sekcji 29.
+Pełna instrukcja uruchomienia jest w sekcji 29, opis usług 3 i 4 w sekcji 34. Cały stos uruchamia jednym poleceniem `.\scripts\start-lab5.ps1`, a krok po kroku opisuje to `POKAZ.md`.
 
 ```
 lab5/
@@ -16,9 +18,15 @@ lab5/
 ├── gateway/                     # API Gateway (LAB4, bez zmian)
 ├── scooter-service/             # usługa 1: + app/events.py, app/messaging.py (LAB5)
 ├── payment-service/             # usługa 2: + app/messaging.py, publikacja w /pay (LAB5)
+├── insurance-service/           # usługa 3: polisy + konsument PaymentCompleted (sekcja 34)
+├── maintenance-service/         # usługa 4: zlecenia serwisowe (sekcja 34)
+├── scripts/                     # start-lab5.ps1, stop-lab5.ps1 (cały stos z jednej konsoli)
+├── POKAZ.md                     # instrukcja krok po kroku do pokazu
+├── URUCHOMIENIE_RECZNE.txt      # uruchomienie ręczne bez skryptu (6 konsol, z wyjaśnieniami)
 └── tests/
     ├── requirements.txt         # httpx + pytest + pika
-    └── integration/             # test_gateway_integration.py (LAB4), test_async_integration.py (LAB5)
+    └── integration/             # test_gateway_integration.py (LAB4), test_async_integration.py (LAB5),
+                                 # test_insurance_maintenance_integration.py (usługi 3 i 4)
 ```
 
 > Sekcje 1–7 to LAB1, 8–12 LAB2, 13–18 LAB3, 19–25 LAB4, zachowane bez zmian merytorycznych. Ich polecenia dotyczą teraz katalogu `lab5`. Liczby testów z tamtych sekcji zaktualizowano w sekcji 29. Opis LAB5 zaczyna się w sekcji 26.
@@ -1207,3 +1215,132 @@ Testy jednostkowe używają `InMemoryEventBroker` (bez RabbitMQ). Wszystkie wcze
 - **Oscar Borowiec (nr albumu 131409):** konsument w Scooter Rental Service: tabele `scooter_payment_stats` i `processed_events`, `app/events.py` (Tolerant Reader, idempotentna transakcja), `bind_queue` w lifespanie, endpointy `/payment-summary` (cache-aside) i `/payment-events/consume`, unieważnianie Redisa po commicie, testy `test_lab5_consumer.py`. Poprawka `blocked_connection_timeout` z testem regresyjnym. Scenariusze 1 i 2. README: sekcje 27 (pytania 3–5), 28 i 30.
 - **Bartłomiej Bogdan (nr albumu 131407):** producent w Payment Service: kontrakt zdarzenia `PaymentCompleted`, publikacja w `/pay` po regule i obsługa `503`, wstrzyknięcie `InMemoryEventBroker` do testów LAB3, testy `test_lab5_events.py`. RabbitMQ w `compose.yaml`, testy integracyjne `test_async_integration.py`, scenariusze 3 i 4, poprawka przekazywania błędów handlera w `messaging.py`. README: sekcje 26, 27 (pytania 1–2, Saga), 29, 31 i 32.
 - **Wspólnie:** wybór zdarzenia i granic usług, diagram, wzajemny przegląd kodu, końcowe uruchomienie wszystkich testów.
+
+---
+
+# LAB5 (rozszerzenie) — usługi 3 i 4: ubezpieczenia i serwis
+
+Plan projektu (sekcja 1) zakładał cztery usługi: flotę, płatności, ubezpieczenia i serwis. Dwie pierwsze działały od LAB3. Teraz dochodzą pozostałe dwie, zbudowane według tego samego wzorca co Payment Service (własny magazyn, odczyt hulajnogi z `SCOOTER-SERVICE` przez Eurekę, mapowanie błędów `404/502/503`). Usługi 3 i 4 napisał Bartłomiej Bogdan (commit `76506a0`). Poprzednie usługi i ich kontrakty **nie zmieniły się** — Payment Service nadal publikuje to samo zdarzenie `PaymentCompleted`.
+
+## 34. Insurance Service i Maintenance Service
+
+| Usługa | Odpowiedzialność | Właściciel danych | Nazwa w Eurece | Port |
+|---|---|---|---|---:|
+| Insurance Service (`insurance-service/`) | Polisy ubezpieczeniowe hulajnóg oraz automatyczne rekordy pokrycia tworzone ze zdarzeń płatności | Polisy (`id`, `scooter_id`, `premium`, `status`) i rekordy pokrycia — w pamięci procesu | `INSURANCE-SERVICE` | 8103 |
+| Maintenance Service (`maintenance-service/`) | Zlecenia serwisowe i ich cykl życia | Zlecenia (`id`, `scooter_id`, `description`, `status`) — w pamięci procesu | `MAINTENANCE-SERVICE` | 8104 |
+
+**Granice:** żadna z usług nie ma dostępu do bazy ani Redisa floty i nie zmienia statusu hulajnogi. Trzymają tylko odniesienie `scooter_id`, a aktualne dane hulajnogi czytają przez `GET /scooters/{id}` (`do_service("SCOOTER-SERVICE", ..., timeout=3)`, błędy mapowane tak jak w sekcji 15).
+
+### Insurance Service
+
+| Metoda i ścieżka (po `StripPrefix`) | Opis | Kody |
+|---|---|---|
+| `GET /health` | Proces żyje | 200 |
+| `GET /insurances`, `GET /insurances/{id}` | Lista i szczegóły polis | 200, 404 |
+| `POST /insurances` | Polisa `{"id", "scooter_id", "premium"}`. **Wywołuje `SCOOTER-SERVICE`.** | 201, 404, 409, 422, 502, 503 |
+| `POST /insurances/{id}/cancel` | Anulowanie: tylko z `active` do `cancelled` | 200, 404, 409 |
+| `GET /insurances/{id}/details` | Polisa z **aktualnymi** danymi hulajnogi. **Wywołuje `SCOOTER-SERVICE`.** | 200, 404, 502, 503 |
+| `GET /coverage` | Rekordy pokrycia utworzone ze zdarzeń | 200 |
+| `POST /insurances/payment-events/consume` | Pobiera do 50 wiadomości z kolejki i tworzy pokrycie | 200, 422, 503 |
+
+Walidacja: `id > 0`, `scooter_id > 0`, `0 < premium ≤ 5000`. Polisę można anulować tylko raz (drugi raz `409 {"detail": "Insurance is already cancelled"}`). Błędne dane dają `422` bez wywołania zależności.
+
+**Dwa różne pojęcia, które łatwo pomylić.** *Polisa* (`/insurances`) jest tworzona ręcznie przez klienta, a składkę podaje klient. *Rekord pokrycia* (`/coverage`) powstaje **automatycznie** ze zdarzenia `PaymentCompleted`, a składka to 5% kwoty płatności (`premium = round(amount × 0.05, 2)`). To dwie osobne kolekcje i nie są ze sobą powiązane.
+
+**Konsument zdarzenia** (`app/events.py`, `app/main.py`): kolejka `insurance.payment-events` (`durable`), wiązana z exchange `pawoom.events` kluczem `payment.completed` w `lifespan`. Zasady są takie same jak w usłudze floty (sekcja 28): Tolerant Reader (`parse_payment_completed`), `basic_get(auto_ack=False)`, ACK po przetworzeniu, `basic_nack(requeue=True)` i `422` przy błędnym zdarzeniu, `503` przy niedostępnym brokerze. Idempotentność: zbiór `processed_events` (po `event_id`), a dodatkowo rekord pokrycia jest kluczowany po `payment_id`, więc ta sama płatność nie utworzy dwóch rekordów. Odpowiedź `consume` zawiera `consumed_messages`, `applied_events`, `duplicate_events`, `ignored_events` i `total_coverage_records`.
+
+### Maintenance Service
+
+| Metoda i ścieżka (po `StripPrefix`) | Opis | Kody |
+|---|---|---|
+| `GET /health` | Proces żyje | 200 |
+| `GET /jobs`, `GET /jobs/{id}` | Lista i szczegóły zleceń | 200, 404 |
+| `POST /jobs` | Zlecenie `{"id", "scooter_id", "description"}` (opis 1–500 znaków). **Wywołuje `SCOOTER-SERVICE`.** | 201, 404, 409, 422, 502, 503 |
+| `POST /jobs/{id}/start` | `pending → in_progress` | 200, 404, 409 |
+| `POST /jobs/{id}/complete` | `in_progress → completed` | 200, 404, 409 |
+| `GET /jobs/{id}/details` | Zlecenie z aktualnymi danymi hulajnogi. **Wywołuje `SCOOTER-SERVICE`.** | 200, 404, 502, 503 |
+
+Reguła biznesowa (maszyna stanów): `pending → in_progress → completed`. Rozpocząć można tylko zlecenie `pending`, zakończyć tylko `in_progress`. Odrzucona operacja (`409`, `detail` zawiera aktualny status) nie zmienia stanu. Usługa **nie publikuje i nie konsumuje zdarzeń**, więc nie potrzebuje `RABBITMQ_URL`.
+
+### Trasy w bramce
+
+Do `gateway/src/main/resources/application.yml` doszły dwie trasy (obie z `StripPrefix=1`, `lb://` po nazwie z Eureki). **Po zmianie konfiguracji trzeba przebudować jar** (`mvn package` w `gateway/`), bo uruchamiany jest `target/api-gateway.jar`.
+
+| Klient (`:8080`) | `id` trasy | `uri` | Ścieżka w usłudze |
+|---|---|---|---|
+| `/api/insurances/**` oraz `/api/coverage/**` | `insurances` | `lb://INSURANCE-SERVICE` | `/insurances/**`, `/coverage/**` |
+| `/api/jobs/**` | `maintenance` | `lb://MAINTENANCE-SERVICE` | `/jobs/**` |
+
+### Jedno zdarzenie, dwóch konsumentów (fan-out)
+
+Producent (Payment Service) publikuje `PaymentCompleted` **raz**, z kluczem `payment.completed`, i nie zna konsumentów. Każdy konsument ma **własną kolejkę** związaną tym samym kluczem, więc broker kopiuje wiadomość do obu. Każdy odbiera ją niezależnie i we własnym tempie.
+
+```
+                                                  ┌─► kolejka scooter.payment-events    ─► SCOOTER-SERVICE   (statystyki hulajnogi)
+PAYMENT-SERVICE ─ publish payment.completed ─► exchange pawoom.events (topic)
+                                                  └─► kolejka insurance.payment-events  ─► INSURANCE-SERVICE (pokrycie, składka 5%)
+```
+
+Dodanie konsumenta nie wymagało żadnej zmiany w producencie. To praktyczne zastosowanie uzasadnienia z sekcji 27, dlaczego exchange jest typu `topic`.
+
+## Uruchomienie (usługi 3 i 4)
+
+Najprościej jednym poleceniem z katalogu głównego repozytorium (Docker Desktop musi działać):
+
+```powershell
+.\lab5\scripts\start-lab5.ps1      # Redis (kontener lab5), Eureka, RabbitMQ, 4 usługi, bramka; czeka na wszystkie trasy
+.\lab5\scripts\stop-lab5.ps1       # zatrzymanie (opcje: -ResetData kasuje app.db, -StopRedis zatrzymuje Redisa)
+```
+
+Ręcznie, w osobnych konsolach, dochodzą do sekcji 29 dwa procesy. Zmienne jak dla Payment Service, zmieniają się tylko nazwa i port:
+
+```powershell
+# lab5\insurance-service  (uruchom PRZED pierwszym pay - tworzy swoją kolejkę)
+$env:SERVICE_NAME = 'INSURANCE-SERVICE'; $env:SERVICE_PORT = '8103'
+# + EUREKA_SERVER_URL, INSTANCE_IP, INSTANCE_HOST, RABBITMQ_URL jak w Payment Service
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --port 8103
+
+# lab5\maintenance-service  (bez RABBITMQ_URL)
+$env:SERVICE_NAME = 'MAINTENANCE-SERVICE'; $env:SERVICE_PORT = '8104'
+# + EUREKA_SERVER_URL, INSTANCE_IP, INSTANCE_HOST
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --port 8104
+```
+
+Pierwszy raz: `py -m venv .venv` i `.\.venv\Scripts\python.exe -m pip install -r requirements.txt` w obu katalogach.
+
+## Wyniki weryfikacji (usługi 3 i 4)
+
+Wykonano 2026-11-17: Windows 11, Python 3.14, Redis 7, RabbitMQ 3.13 i Eureka w Dockerze, cztery usługi i bramka przez Uvicorn i Javę 21. Usługi zatrzymywano przez zakończenie procesu.
+
+| Scenariusz | Stan i żądanie | Wynik rzeczywisty |
+|---|---|---|
+| Rejestracja | Start wszystkich procesów | W Eurece `PAYMENT-SERVICE`, `INSURANCE-SERVICE`, `MAINTENANCE-SERVICE`, `SCOOTER-SERVICE` ze statusem `UP`. Bramka zaczęła widzieć wszystkie cztery trasy po ok. minucie (opóźnienie rejestru z sekcji 22). |
+| Odczyt hulajnogi przez Eurekę | `POST /api/insurances`, `GET /api/insurances/{id}/details`, to samo dla `/api/jobs` | `201`, a `/details` zwraca `scooter` z danymi z usługi floty. Dla nieistniejącej hulajnogi `404 {"detail":"Scooter not found"}` i rekord nie powstaje. |
+| Reguły | Dwukrotne `cancel`. `complete` na zleceniu `pending`. Powtórne `start` i `complete`. | `409` za każdym razem, stan bez zmian. Poprawna sekwencja `start` → `complete` daje `200`. |
+| Fan-out | Płatność `200.0`, `POST /api/payments/{id}/pay` | `200 paid`. W obu kolejkach po jednej wiadomości (`messages_ready = 1`). Odbiór przez flotę nie zabiera wiadomości ubezpieczeniom. Po odbiorze w obu usługach: `paid_payments_count: 1`, `total_paid_amount: 200.0` oraz rekord pokrycia ze składką `10.0`. Obie kolejki puste. |
+| Odrzucone `pay` | Drugie `pay` i `pay` nieistniejącej płatności | `409` i `404`, żadna z kolejek nie dostała wiadomości. |
+| Duplikat | To samo zdarzenie (`event_id`) wysłane dwa razy bezpośrednio do exchange'a | `consumed_messages: 2`, `applied_events: 1`, `duplicate_events: 1`, jeden rekord pokrycia. |
+| Ubezpieczenia wyłączone w trakcie `pay` | Zakończenie procesu Insurance Service, `pay`, ponowny start, `consume` | `pay` → `200 paid` (producent działa niezależnie). Wiadomość czekała w kolejce. Po starcie `consume` odebrał zaległości (5 wiadomości: 4 zastosowane, 1 duplikat) i pokrycie dla tej płatności powstało. |
+
+**Testy automatyczne:** `insurance-service` **24 passed**, `maintenance-service` **17 passed**, `scooter-service` **33 passed**, `payment-service` **18 passed**. Testy integracyjne przez bramkę: **19 passed** (11 z LAB4/LAB5 oraz 8 nowych w `tests/integration/test_insurance_maintenance_integration.py`). Powtórzone kilka razy, także w odwrotnej kolejności plików, za każdym razem `19 passed`.
+
+| Nowy test integracyjny | Co wykazuje |
+|---|---|
+| `test_insurance_created_and_details_read_scooter_through_eureka` | `201` i `/details` z danymi hulajnogi z floty, `x-gateway: lab4` |
+| `test_insurance_for_missing_scooter_returns_404_and_stores_nothing` | `404` z floty, polisa nie powstaje |
+| `test_insurance_cancel_rule_and_validation` | `cancel` raz `200`, drugi raz `409`, duplikat `409`, `422` dla ujemnej składki |
+| `test_job_state_machine_through_gateway` | pełna maszyna stanów, `409` przy złej kolejności, stan bez zmian po odrzuceniu |
+| `test_job_for_missing_scooter_returns_404_and_missing_job_404` | `404` dla nieistniejącej hulajnogi i zlecenia, `422` dla błędnych danych |
+| `test_pay_fans_out_to_both_queues_and_each_consumer_applies_it` | jedna publikacja, dwie kolejki, niezależny odbiór, składka 5% |
+| `test_insurance_consumer_is_idempotent` | duplikat `event_id` zastosowany raz |
+| `test_rejected_pay_publishes_to_neither_queue` | `409`/`404` nie publikują do żadnej kolejki |
+
+## Ograniczenia (usługi 3 i 4)
+
+- **Dane tylko w pamięci procesu.** Restart Insurance Service kasuje polisy, rekordy pokrycia i zbiór `processed_events`. Zdarzenia już odebrane i potwierdzone (ACK) są wtedy bezpowrotnie utracone dla tej usługi — broker trzyma tylko te, których jeszcze nie odebrano. Restart Maintenance Service kasuje zlecenia.
+- **Kolejka powstaje dopiero przy pierwszym starcie konsumenta.** Płatności opłacone, zanim Insurance Service choć raz wystartował, nie trafią do jego kolejki (exchange rozsyła tylko do związanych kolejek). Dlatego usługi konsumujące uruchamia się przed Payment Service.
+- **Starsze testy zostawiają zdarzenia w kolejce ubezpieczeń.** `test_async_integration.py` konsumuje tylko kolejkę floty, a każde `pay` trafia też do kolejki ubezpieczeń (po serii testów było tam 4 zaległe wiadomości). Nowe testy opróżniają obie kolejki na starcie.
+- **Konsumpcja jest ręczna** (`POST .../consume`), jak w usłudze floty, więc pokrycie powstaje dopiero po wywołaniu endpointu.
+- **Serwis nie zmienia statusu hulajnogi.** Maintenance Service tylko potwierdza, że hulajnoga istnieje. Status `maintenance` w usłudze floty nadal nie ma operacji, która do niego prowadzi, więc hulajnogę w serwisie można wypożyczyć.
+- **Polisa i pokrycie nie są powiązane.** Usługa floty nie sprawdza ubezpieczenia przy wypożyczeniu, a `payments_covered` w rekordzie pokrycia zawsze ma wartość `1`, bo rekord powstaje raz na płatność.
+- **Pozostałe ograniczenia** (opóźnienie rejestru, brak DLQ, brak uwierzytelniania, brak publisher confirms) są takie same jak w sekcjach 17, 22 i 31.
