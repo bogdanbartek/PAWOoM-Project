@@ -39,6 +39,22 @@ spring:
                 - Path=/api/payments,/api/payments/**
               filters:
                 - StripPrefix=1
+            # Usługa 3: ubezpieczenia (konsumuje zdarzenia PaymentCompleted - LAB5).
+            # /api/insurances/** -> StripPrefix=1 -> /insurances/** w INSURANCE-SERVICE
+            - id: insurances
+              uri: lb://INSURANCE-SERVICE
+              predicates:
+                - Path=/api/insurances,/api/insurances/**,/api/coverage,/api/coverage/**
+              filters:
+                - StripPrefix=1
+            # Usługa 4: serwis hulajnóg (maszyna stanów pending->in_progress->completed).
+            # /api/jobs/** -> StripPrefix=1 -> /jobs/** w MAINTENANCE-SERVICE
+            - id: maintenance
+              uri: lb://MAINTENANCE-SERVICE
+              predicates:
+                - Path=/api/jobs,/api/jobs/**
+              filters:
+                - StripPrefix=1
 
 eureka:
   client:
