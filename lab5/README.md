@@ -21,6 +21,7 @@ lab5/
 ├── insurance-service/           # usługa 3: polisy + konsument PaymentCompleted (sekcja 34)
 ├── maintenance-service/         # usługa 4: zlecenia serwisowe (sekcja 34)
 ├── scripts/                     # start-lab5.ps1, stop-lab5.ps1 (cały stos z jednej konsoli)
+├── frontend/                    # podgląd w przeglądarce: server.py + index.html (opcjonalny)
 ├── POKAZ.md                     # instrukcja krok po kroku do pokazu
 ├── URUCHOMIENIE_RECZNE.txt      # uruchomienie ręczne bez skryptu (6 konsol, z wyjaśnieniami)
 └── tests/

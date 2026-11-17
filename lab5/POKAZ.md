@@ -55,6 +55,18 @@ Po starcie odśwież karty z panelami:
 
 ---
 
+### Opcjonalnie: podgląd w przeglądarce zamiast konsoli
+
+Prosta strona z tabelami, przyciskami i logiem zapytań (status, `X-Cache`, `X-Gateway`). Pokazuje też stan usług z Eureki i liczbę wiadomości w obu kolejkach RabbitMQ. Uruchom **po** `start-lab5.ps1`, w osobnej konsoli:
+
+```powershell
+py lab5\frontend\server.py
+```
+
+Otwórz **http://127.0.0.1:8090**. Przycisk **„Uruchom scenariusz"** sam przechodzi cały Akt 3 (hulajnoga, płatność, opłacenie, odbiór zdarzeń przez obie usługi). Pojedyncze zakładki otwierają adresy `#payments`, `#insurances`, `#jobs`, `#events`. Kończysz przez `Ctrl+C`. Szczegóły i zasada działania są w nagłówku `lab5\frontend\server.py`.
+
+---
+
 ## 3. Przygotowanie konsoli do pokazu
 
 Wklej raz. Funkcja `api` wysyła żądanie przez bramkę i pokazuje **nagłówki** (to ważne: `X-Gateway`, `x-cache`) oraz treść.
