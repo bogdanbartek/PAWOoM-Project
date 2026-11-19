@@ -202,10 +202,17 @@ SPRAWDŹ:   curl.exe http://127.0.0.1:8104/health
 
     cd C:\Users\oscar\Desktop\PAWOoM-Project\lab5\gateway
     $env:JAVA_HOME = 'C:\Users\oscar\tools\jdk-21.0.13+9'
-    java -jar target\api-gateway.jar
+    & "$env:JAVA_HOME\bin\java.exe" -jar target\api-gateway.jar
 
-  Alternatywnie (kompiluje i uruchamia, wolniej), wymaga też Mavena w PATH:
+  UWAGA: samo ustawienie JAVA_HOME NIE sprawia, że polecenie "java" jest
+  znane w konsoli - Java jest rozpakowana ręcznie, bez instalatora, więc nie
+  ma jej w PATH. Dlatego uruchamiamy ją pełną ścieżką (powyżej). Błąd
+  "The term 'java' is not recognized" znaczy, że wpisano samo "java".
+
+  Alternatywa: dodaj Javę do PATH w tej konsoli, wtedy działa też samo "java"
+  oraz Maven (kompiluje i uruchamia, wolniej):
     $env:Path = "$env:JAVA_HOME\bin;C:\Users\oscar\tools\apache-maven-3.9.11\bin;$env:Path"
+    java -jar target\api-gateway.jar
     mvn spring-boot:run
 
 CO TO ROBI: uruchamia bramkę na :8080. Czyta trasy z

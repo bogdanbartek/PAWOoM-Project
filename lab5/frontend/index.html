@@ -31,6 +31,20 @@
   h3 { margin: 14px 0 6px; font-size: 14px; }
   #logtbl tr { cursor: pointer; } #logtbl tr:hover { background: #f0f6ff; }
   .scroll { max-height: 340px; overflow: auto; }
+  #demo-grid { display: flex; gap: 18px; flex-wrap: wrap; }
+  #demo-list { margin: 0; padding: 0 0 0 24px; min-width: 330px; }
+  #demo-list li { padding: 3px 6px; color: #999; }
+  #demo-list li.avail { cursor: pointer; color: #111; }
+  #demo-list li.done { color: #1f7a3d; }
+  #demo-list li.cur { background: #fff1b8; font-weight: bold; }
+  #demo-main { flex: 1; min-width: 340px; }
+  #demo-nav { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  #demo-nav button { padding: 6px 14px; }
+  #d-go { background: #1f7a3d; color: #fff; border: 1px solid #14572b; font-weight: bold; }
+  #d-go:disabled { background: #8aa; }
+  .box { border: 1px solid #ccc; background: #fafafa; padding: 8px 12px; margin: 10px 0; }
+  .box p { margin: 4px 0 8px; }
+  .box code { display: block; background: #eee; padding: 4px 8px; font: 12px Consolas, monospace; word-break: break-all; }
 </style>
 </head>
 <body>
@@ -39,13 +53,41 @@
   <b>LAB5 podgląd</b>
   <span id="infra"></span>
   <label><input type="checkbox" id="auto" checked> odświeżaj co 5 s</label>
-  <button id="btn-demo" title="Dodaje hulajnogę i płatność, opłaca ją i odbiera zdarzenia w obu usługach">Uruchom scenariusz</button>
 </header>
 <div id="flash">Gotowe.</div>
 <div class="wrap muted" style="padding-top:4px">Stan Eureki odświeża się z opóźnieniem do ok. 30 s, a liczniki kolejek RabbitMQ do kilku sekund.</div>
 
 <nav id="nav"></nav>
 <main>
+
+<section id="tab-demo">
+  <p class="muted">Jeden krok na raz. Najpierw przeczytaj, co zaraz się stanie, potem kliknij zielony przycisk i obejrzyj wynik.
+     Patrz też na plakietki u góry (kolejki RabbitMQ) oraz na log na dole.</p>
+  <div id="demo-grid">
+    <ol id="demo-list"></ol>
+    <div id="demo-main">
+      <div id="demo-nav">
+        <button id="d-prev">← Wstecz</button>
+        <b id="d-pos"></b>
+        <button id="d-go"></button>
+        <button id="d-next">Dalej →</button>
+        <button id="d-reset" title="Nowa hulajnoga i nowa płatność; stare zostają w tabelach">↺ Od nowa</button>
+      </div>
+      <h3 id="d-title"></h3>
+      <div class="box">
+        <b>Co się teraz stanie</b>
+        <p id="d-what"></p>
+        <code id="d-req"></code>
+      </div>
+      <div class="box" id="d-result" hidden>
+        <b>Wynik</b>
+        <p id="d-status"></p>
+        <pre id="d-body"></pre>
+        <p><b>Na co spojrzeć:</b> <span id="d-look"></span></p>
+      </div>
+    </div>
+  </div>
+</section>
 
 <section id="tab-scooters">
   <form id="f-scooter">
@@ -114,7 +156,7 @@
 
 const SERVICES = ['SCOOTER-SERVICE', 'PAYMENT-SERVICE', 'INSURANCE-SERVICE', 'MAINTENANCE-SERVICE'];
 const QUEUES = ['scooter.payment-events', 'insurance.payment-events'];
-const TABS = [['scooters', 'Hulajnogi'], ['payments', 'Płatności'], ['insurances', 'Ubezpieczenia'], ['jobs', 'Serwis'], ['events', 'Zdarzenia']];
+const TABS = [['demo', 'Scenariusz krok po kroku'], ['scooters', 'Hulajnogi'], ['payments', 'Płatności'], ['insurances', 'Ubezpieczenia'], ['jobs', 'Serwis'], ['events', 'Zdarzenia']];
 let activeTab = 'scooters';
 let logRows = [];
 
@@ -144,7 +186,7 @@ async function call(method, path, body, silent) {
   catch (e) { text = 'Błąd sieci: ' + e; }
   const ms = Math.round(performance.now() - t0);
   const out = {
-    ok: !!res && res.ok, status: res ? res.status : 0, text: text, data: null,
+    ok: !!res && res.ok, status: res ? res.status : 0, text: text, data: null, ms: ms,
     cache: res ? (res.headers.get('X-Cache') || '') : '',
     gw: res ? (res.headers.get('X-Gateway') || '') : ''
   };
@@ -389,37 +431,132 @@ function wireForms() {
   $('r-insurances').onclick = () => { loadInsurances(false); loadCoverage(false); };
   $('r-jobs').onclick = () => loadJobs(false);
   $('btn-clear').onclick = () => { logRows = []; renderLog(); };
-  $('btn-demo').onclick = runDemo;
+  $('d-go').onclick = demoExec;
+  $('d-prev').onclick = () => { if (demo.view > 0) { demo.view--; demo.error = null; renderDemo(); } };
+  $('d-next').onclick = () => { if (demo.view < demo.steps.length - 1) { demo.view++; demo.error = null; renderDemo(); } };
+  $('d-reset').onclick = demoReset;
 }
 
-// ---------- scenariusz: to samo, co w pokazie, jednym kliknięciem ----------
+// ---------- scenariusz krok po kroku ----------
 
-async function runDemo() {
-  const btn = $('btn-demo');
-  btn.disabled = true;
-  const sid = rid(), pid = rid();
-  const steps = [
-    ['1. Dodaj hulajnogę ' + sid, 'POST', '/api/scooters', { id: sid, name: 'Demo ' + sid, model: 'Xiaomi Mi 4 Pro' }],
-    ['2. Odczyt hulajnogi (cache MISS)', 'GET', '/api/scooters/' + sid],
-    ['3. Odczyt hulajnogi (cache HIT)', 'GET', '/api/scooters/' + sid],
-    ['4. Utwórz płatność ' + pid + ' (200 zł); Payment pyta flotę przez Eurekę', 'POST', '/api/payments', { id: pid, scooter_id: sid, amount: 200 }],
-    ['5. Statystyki płatności hulajnogi przed (0)', 'GET', '/api/scooters/' + sid + '/payment-summary'],
-    ['6. Opłać płatność (zdarzenie trafia do dwóch kolejek)', 'POST', '/api/payments/' + pid + '/pay'],
-    ['7. Scooter odbiera zdarzenie', 'POST', '/api/scooters/payment-events/consume'],
-    ['8. Statystyki płatności hulajnogi po (1)', 'GET', '/api/scooters/' + sid + '/payment-summary'],
-    ['9. Insurance odbiera zdarzenie', 'POST', '/api/insurances/payment-events/consume'],
-    ['10. Pokrycie ubezpieczeniowe', 'GET', '/api/coverage']
+let demo = null;
+
+function makeSteps(sid, pid) {
+  return [
+    {
+      title: 'Dodaj hulajnogę', method: 'POST', path: '/api/scooters', body: { id: sid, name: 'Demo ' + sid, model: 'Xiaomi Mi 4 Pro' },
+      what: 'Dodajemy do floty nową hulajnogę o numerze ' + sid + '. Flota zapisuje ją w swojej bazie (SQLite) ze statusem "available".',
+      look: 'Status 201 (utworzono). W odpowiedzi status hulajnogi to "available".'
+    },
+    {
+      title: 'Odczyt hulajnogi (pierwszy raz)', method: 'GET', path: '/api/scooters/' + sid,
+      what: 'Pytamy o tę hulajnogę. Flota najpierw zagląda do pamięci podręcznej (Redis). Jeszcze jej tam nie ma, więc czyta z bazy i zostawia kopię w Redisie.',
+      look: 'W nagłówku X-Cache jest MISS (pudło): odpowiedź przyszła z bazy.'
+    },
+    {
+      title: 'Odczyt hulajnogi (drugi raz)', method: 'GET', path: '/api/scooters/' + sid,
+      what: 'Pytamy o to samo jeszcze raz. Teraz kopia już leży w Redisie, więc baza w ogóle nie jest dotykana.',
+      look: 'X-Cache: HIT (trafienie): odpowiedź przyszła z pamięci podręcznej.'
+    },
+    {
+      title: 'Utwórz płatność 200 zł', method: 'POST', path: '/api/payments', body: { id: pid, scooter_id: sid, amount: 200 },
+      what: 'Tworzymy płatność. Payment Service nie ma danych hulajnóg, więc przez Eurekę pyta flotę: "czy hulajnoga ' + sid + ' istnieje?". Dopiero po odpowiedzi "tak" zapisuje płatność.',
+      look: 'Status 201 i status płatności "pending" (oczekuje). Żadne zdarzenie jeszcze nie zostało wysłane.'
+    },
+    {
+      title: 'Statystyki płatności hulajnogi (przed)', method: 'GET', path: '/api/scooters/' + sid + '/payment-summary',
+      what: 'Pytamy flotę, ile płatności opłacono za tę hulajnogę. Na razie nic nie opłacono.',
+      look: 'paid_payments_count: 0 i total_paid_amount: 0. Zapamiętaj to, porównamy z krokiem 8.'
+    },
+    {
+      title: 'Opłać płatność', method: 'POST', path: '/api/payments/' + pid + '/pay',
+      what: 'Opłacamy płatność. Payment zmienia jej status na "paid" i wrzuca zdarzenie "PaymentCompleted" do RabbitMQ. Klient dostaje odpowiedź od razu i na nikogo nie czeka.',
+      look: 'Status płatności "paid". Spójrz na plakietki kolejek u góry: obie powinny mieć po 1 wiadomości (żółte). Liczniki RabbitMQ odświeżają się z opóźnieniem kilku sekund, więc poczekaj chwilę.'
+    },
+    {
+      title: 'Scooter odbiera zdarzenie', method: 'POST', path: '/api/scooters/payment-events/consume',
+      what: 'Flota odbiera swoją wiadomość z kolejki, zwiększa statystyki w bazie i dopiero potem potwierdza odbiór brokerowi.',
+      look: 'applied_events: 1. Plakietka kolejki "scooter" wraca na 0, a kolejka "insurance" nadal ma wiadomość, bo ubezpieczenia jej jeszcze nie odebrały.'
+    },
+    {
+      title: 'Statystyki płatności hulajnogi (po)', method: 'GET', path: '/api/scooters/' + sid + '/payment-summary',
+      what: 'Pytamy o te same statystyki co w kroku 5.',
+      look: 'Teraz paid_payments_count: 1 i total_paid_amount: 200. Między krokiem 6 a 7 flota "nie wiedziała" o płatności (spójność ostateczna). X-Cache to MISS, bo odbiór zdarzenia usunął starą kopię z Redisa.'
+    },
+    {
+      title: 'Insurance odbiera zdarzenie', method: 'POST', path: '/api/insurances/payment-events/consume',
+      what: 'Usługa ubezpieczeń odbiera swoją kopię tej samej wiadomości i tworzy rekord pokrycia ubezpieczeniowego.',
+      look: 'applied_events: 1. Obie plakietki kolejek są teraz na 0: jedna publikacja, dwie niezależne kopie.'
+    },
+    {
+      title: 'Pokrycie ubezpieczeniowe', method: 'GET', path: '/api/coverage',
+      what: 'Pobieramy listę pokryć ubezpieczeniowych. Powinien na niej być rekord dla naszej płatności.',
+      look: 'Znajdź płatność ' + pid + ': składka (premium) wynosi 10, czyli 5% z 200 zł.'
+    }
   ];
-  for (const s of steps) {
-    const r = await call(s[1], s[2], s[3]);
-    flash(s[0], r);
-    showDetail(s[0], r);
-    if (!r.ok) break;
-    if (s[0].startsWith('6.')) await loadInfra();
+}
+
+function demoReset() {
+  const sid = rid(), pid = rid();
+  demo = { sid: sid, pid: pid, steps: makeSteps(sid, pid), results: [], done: 0, view: 0, error: null, busy: false };
+  renderDemo();
+  flashText('Scenariusz od nowa: hulajnoga ' + sid + ', płatność ' + pid + '.', true);
+}
+
+function renderDemo() {
+  const d = demo, n = d.steps.length, s = d.steps[d.view];
+  const executed = d.view < d.done;
+
+  const list = $('demo-list');
+  list.replaceChildren();
+  d.steps.forEach((st, i) => {
+    const li = el('li', st.title);
+    if (i < d.done) li.classList.add('done');
+    if (i <= d.done) { li.classList.add('avail'); li.onclick = () => { d.view = i; d.error = null; renderDemo(); }; }
+    if (i === d.view) li.classList.add('cur');
+    list.append(li);
+  });
+
+  $('d-pos').textContent = 'Krok ' + (d.view + 1) + ' z ' + n;
+  $('d-title').textContent = (d.view + 1) + '. ' + s.title;
+  $('d-what').textContent = s.what;
+  $('d-req').textContent = s.method + ' ' + s.path + (s.body ? '   ' + JSON.stringify(s.body) : '');
+
+  $('d-prev').disabled = d.view === 0;
+  const go = $('d-go');
+  go.hidden = executed;
+  go.disabled = d.busy || d.view !== d.done;
+  go.textContent = d.error ? '▶ Spróbuj ponownie' : '▶ Wykonaj krok ' + (d.view + 1);
+  const next = $('d-next');
+  next.hidden = !executed;
+  next.disabled = d.view >= n - 1;
+  next.textContent = d.view >= n - 1 ? 'To był ostatni krok' : 'Dalej →';
+
+  const res = executed ? d.results[d.view] : d.error;
+  $('d-result').hidden = !res;
+  if (res) {
+    const st = $('d-status');
+    st.textContent = 'HTTP ' + (res.status || 'ERR') + '   |   X-Cache: ' + (res.cache || '–') + '   |   X-Gateway: ' + (res.gw || '–') + '   |   ' + res.ms + ' ms';
+    st.className = res.ok ? 'ok' : 'err';
+    $('d-body').textContent = pretty(res.text);
+    $('d-look').textContent = res.ok ? s.look : 'Krok się nie powiódł. Sprawdź, czy system działa (plakietki u góry), i spróbuj ponownie.';
   }
-  btn.disabled = false;
+}
+
+async function demoExec() {
+  const d = demo, i = d.view, s = d.steps[i];
+  if (d.busy || i !== d.done) return;
+  d.busy = true;
+  renderDemo();
+  const r = await call(s.method, s.path, s.body);
+  flash((i + 1) + '. ' + s.title, r);
+  d.busy = false;
+  if (r.ok) { d.results[i] = r; d.done = i + 1; d.error = null; } else { d.error = r; }
+  renderDemo();
+  // Liczniki kolejek w RabbitMQ odświeżają się z opóźnieniem, więc sprawdzamy je kilka razy.
   loadInfra();
-  refreshTab(activeTab, true);
+  setTimeout(loadInfra, 2500);
+  setTimeout(loadInfra, 6000);
 }
 
 // ---------- start ----------
@@ -440,10 +577,10 @@ function init() {
 
   wireForms();
   const fromUrl = location.hash.slice(1);   // np. http://127.0.0.1:8090/#payments otwiera zakładkę Płatności
-  showTab(TABS.some(t => t[0] === fromUrl) ? fromUrl : 'scooters');
+  demoReset();
+  showTab(TABS.some(t => t[0] === fromUrl) ? fromUrl : 'demo');
   loadInfra();
   setInterval(() => { if ($('auto').checked) { loadInfra(); refreshTab(activeTab, true); } }, 5000);
-  if (location.hash === '#demo') runDemo();
 }
 
 init();
