@@ -1,0 +1,184 @@
+# LAB6: cały system wypożyczalni hulajnóg w kontenerach, jednym poleceniem:
+#   docker compose up --build -d
+#
+# Na hoście publikowane są TYLKO: bramka (127.0.0.1:8080) oraz panele diagnostyczne
+# Eureki (127.0.0.1:8761) i RabbitMQ (127.0.0.1:15672). Usługi, Redis i port AMQP są dostępne
+# wyłącznie wewnątrz sieci Compose (expose), pod nazwami DNS równymi nazwom usług poniżej.
+services:
+  eureka:
+    build:
+      context: ./eureka-server
+    ports:
+      - "127.0.0.1:8761:8761"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO /dev/null http://127.0.0.1:8761/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    expose:
+      - "6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    ports:
+      - "127.0.0.1:15672:15672"   # panel Management (guest/guest); AMQP 5672 tylko wewnątrz sieci
+    expose:
+      - "5672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    healthcheck:
+      # check_port_connectivity sprawdza, że listener AMQP (5672) naprawdę przyjmuje połączenia.
+      # Samo `rabbitmq-diagnostics ping` potwierdza tylko, że węzeł Erlanga żyje: usługi startowały
+      # kilka sekund przed otwarciem portu AMQP, nie powiązały kolejek z exchange'em, a zdarzenia
+      # z /pay były gubione (`routed: false`).
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+
+  scooter-service:
+    build:
+      context: ./scooter-service
+    expose:
+      - "8101"
+    environment:
+      SERVICE_NAME: SCOOTER-SERVICE
+      SERVICE_PORT: "8101"
+      INSTANCE_HOST: scooter-service
+      INSTANCE_IP: scooter-service
+      EUREKA_SERVER_URL: http://eureka:8761
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/%2F
+      DATABASE_URL: sqlite:////data/app.db
+      REDIS_URL: redis://redis:6379/0
+      CACHE_PREFIX: lab6:131409:scooter-service
+    volumes:
+      - scooter_data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8101/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    depends_on:
+      eureka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  insurance-service:
+    build:
+      context: ./insurance-service
+    expose:
+      - "8103"
+    environment:
+      SERVICE_NAME: INSURANCE-SERVICE
+      SERVICE_PORT: "8103"
+      INSTANCE_HOST: insurance-service
+      INSTANCE_IP: insurance-service
+      EUREKA_SERVER_URL: http://eureka:8761
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/%2F
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8103/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    depends_on:
+      eureka:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  payment-service:
+    build:
+      context: ./payment-service
+    expose:
+      - "8102"
+    environment:
+      SERVICE_NAME: PAYMENT-SERVICE
+      SERVICE_PORT: "8102"
+      INSTANCE_HOST: payment-service
+      INSTANCE_IP: payment-service
+      EUREKA_SERVER_URL: http://eureka:8761
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/%2F
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8102/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    depends_on:
+      eureka:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      # Kolejki konsumentów (scooter.payment-events, insurance.payment-events) powstają przy ich starcie.
+      # Payment publikuje dopiero po starcie tych usług, więc żadne zdarzenie nie zostanie odrzucone.
+      scooter-service:
+        condition: service_healthy
+      insurance-service:
+        condition: service_healthy
+
+  maintenance-service:
+    build:
+      context: ./maintenance-service
+    expose:
+      - "8104"
+    environment:
+      SERVICE_NAME: MAINTENANCE-SERVICE
+      SERVICE_PORT: "8104"
+      INSTANCE_HOST: maintenance-service
+      INSTANCE_IP: maintenance-service
+      EUREKA_SERVER_URL: http://eureka:8761
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8104/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    depends_on:
+      eureka:
+        condition: service_healthy
+
+  api-gateway:
+    build:
+      context: ./gateway
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      SERVER_ADDRESS: 0.0.0.0
+      GATEWAY_PORT: "8080"
+      GATEWAY_EUREKA_URL: http://eureka:8761/eureka/
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO /dev/null http://127.0.0.1:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    depends_on:
+      eureka:
+        condition: service_healthy
+      scooter-service:
+        condition: service_healthy
+      payment-service:
+        condition: service_healthy
+      insurance-service:
+        condition: service_healthy
+      maintenance-service:
+        condition: service_healthy
+
+volumes:
+  scooter_data:
