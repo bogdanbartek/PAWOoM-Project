@@ -4,7 +4,7 @@ Kontrakt: exchange `pawoom.events` (topic), routing key `payment.completed`,
 kolejka `insurance.payment-events` (durable). Właścicielem kolejki jest konsument.
 
 Gdy płatność zostanie opłacona, insurance-service automatycznie tworzy
-rekord pokrycia ubezpieczeniowego (składka = 5% wartości płatności).
+rekord pokrycia ubezpieczeniowego (składka = stawka % z polisy hulajnogi × kwota płatności).
 """
 from dataclasses import dataclass
 from typing import Any
@@ -12,7 +12,6 @@ from typing import Any
 QUEUE_NAME = "insurance.payment-events"
 ROUTING_KEY = "payment.completed"
 EVENT_TYPE = "PaymentCompleted"
-PREMIUM_RATE = 0.05  # 5% wartości płatności jako składka
 
 
 class InvalidEventError(ValueError):

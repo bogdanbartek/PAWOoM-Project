@@ -1,10 +1,12 @@
 """Insurance Service — mikrousługa ubezpieczeń hulajnóg.
 
-Właściciel danych: polisy ubezpieczeniowe (`id`, `scooter_id`, `premium`, `status`).
+Właściciel danych: polisy ubezpieczeniowe (`id`, `scooter_id`, `rate_percent`, `status`).
 Danych hulajnóg NIE przechowuje - pyta o nie SCOOTER-SERVICE przez Eurekę.
 
 LAB5: konsumuje zdarzenia `PaymentCompleted` z RabbitMQ →
-automatycznie tworzy rekordy pokrycia ubezpieczeniowego (składka = 5% płatności).
+automatycznie tworzy rekordy pokrycia ubezpieczeniowego, ale tylko gdy hulajnoga
+ma aktywną polisę. Składka = kwota płatności × `rate_percent` polisy / 100;
+rekord wskazuje tę polisę (`insurance_id`).
 """
 import logging
 from contextlib import asynccontextmanager
@@ -14,7 +16,6 @@ from fastapi import FastAPI, HTTPException, Request
 
 from app.eureka import create_eureka_client
 from app.events import (
-    PREMIUM_RATE,
     QUEUE_NAME,
     ROUTING_KEY,
     InvalidEventError,
@@ -132,7 +133,7 @@ def create_app(eureka_client=None, event_broker=None) -> FastAPI:
     @app.post("/insurances/payment-events/consume")
     def consume_payment_events(request: Request) -> dict:
         """LAB5: pobiera dostępne wiadomości z kolejki i tworzy rekordy pokrycia."""
-        stats = {"applied": 0, "duplicates": 0, "ignored": 0}
+        stats = {"applied": 0, "duplicates": 0, "ignored": 0, "uninsured": 0}
 
         def handle_event(event: dict) -> None:
             parsed: PaymentCompleted | None = parse_payment_completed(event)
@@ -142,12 +143,21 @@ def create_app(eureka_client=None, event_broker=None) -> FastAPI:
             if parsed.event_id in request.app.state.processed_events:
                 stats["duplicates"] += 1
                 return
+            # Pokrycie należy się tylko hulajnodze z aktywną polisą (stan w chwili odbioru zdarzenia).
+            policy = _active_policy_for(request, parsed.scooter_id)
+            if policy is None:
+                # Zdarzenie przetworzone (ACK), ale bez pokrycia - płatność nie była ubezpieczona.
+                request.app.state.processed_events.add(parsed.event_id)
+                stats["uninsured"] += 1
+                return
             # Idempotentny zapis: każde payment_id tworzy dokładnie jeden rekord pokrycia.
             if parsed.payment_id not in request.app.state.coverage:
-                premium = round(parsed.amount * PREMIUM_RATE, 2)
+                premium = round(parsed.amount * policy.rate_percent / 100, 2)
                 request.app.state.coverage[parsed.payment_id] = CoverageRecord(
+                    insurance_id=policy.id,
                     scooter_id=parsed.scooter_id,
                     payment_id=parsed.payment_id,
+                    rate_percent=policy.rate_percent,
                     premium=premium,
                 )
             request.app.state.processed_events.add(parsed.event_id)
@@ -166,6 +176,7 @@ def create_app(eureka_client=None, event_broker=None) -> FastAPI:
             "applied_events": stats["applied"],
             "duplicate_events": stats["duplicates"],
             "ignored_events": stats["ignored"],
+            "uninsured_events": stats["uninsured"],
             "total_coverage_records": len(request.app.state.coverage),
         }
 
@@ -177,6 +188,16 @@ def _get_or_404(request: Request, insurance_id: int) -> Insurance:
     if insurance is None:
         raise HTTPException(status_code=404, detail="Insurance not found")
     return insurance
+
+
+def _active_policy_for(request: Request, scooter_id: int) -> Insurance | None:
+    """Aktywna polisa hulajnogi; przy kilku wybieramy najstarszą (najmniejsze id)."""
+    active = [
+        insurance
+        for insurance in request.app.state.insurances.values()
+        if insurance.scooter_id == scooter_id and insurance.status == "active"
+    ]
+    return min(active, key=lambda insurance: insurance.id, default=None)
 
 
 async def _fetch_scooter(request: Request, scooter_id: int) -> dict:

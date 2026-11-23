@@ -47,5 +47,5 @@ def client(eureka_fake, broker):
         yield test_client
 
 
-def insurance_body(insurance_id=1, scooter_id=1, premium=50.0):
-    return {"id": insurance_id, "scooter_id": scooter_id, "premium": premium}
+def insurance_body(insurance_id=1, scooter_id=1, rate_percent=5.0):
+    return {"id": insurance_id, "scooter_id": scooter_id, "rate_percent": rate_percent}

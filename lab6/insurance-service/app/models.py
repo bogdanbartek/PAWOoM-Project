@@ -10,13 +10,14 @@ class InsuranceCreate(BaseModel):
     id: int = Field(gt=0)
     # Tylko odniesienie do hulajnogi - jej dane należą do Scooter Rental Service.
     scooter_id: int = Field(gt=0)
-    premium: float = Field(gt=0, le=5_000, description="Składka ubezpieczeniowa (PLN)")
+    # Stawka składki w procentach kwoty płatności (np. 5 = 5%); używana przy tworzeniu pokrycia.
+    rate_percent: float = Field(gt=0, le=100, description="Składka w % kwoty płatności")
 
 
 class Insurance(BaseModel):
     id: int
     scooter_id: int
-    premium: float
+    rate_percent: float
     status: InsuranceStatus = "active"
 
 
@@ -27,9 +28,15 @@ class InsuranceDetails(BaseModel):
 
 
 class CoverageRecord(BaseModel):
-    """Rekord pokrycia ubezpieczeniowego tworzony automatycznie z zdarzenia PaymentCompleted."""
+    """Rekord pokrycia ubezpieczeniowego tworzony automatycznie z zdarzenia PaymentCompleted.
+
+    Powstaje tylko dla hulajnogi z aktywną polisą; `insurance_id` wskazuje tę polisę.
+    """
+    insurance_id: int
     scooter_id: int
     payment_id: int
-    # Składka = 5% wartości płatności — wyliczana automatycznie.
+    # Stawka polisy w chwili odbioru zdarzenia (kopia, żeby rekord był czytelny sam w sobie).
+    rate_percent: float
+    # Składka w PLN = kwota płatności × rate_percent / 100 — wyliczana automatycznie.
     premium: float
     payments_covered: int = 1

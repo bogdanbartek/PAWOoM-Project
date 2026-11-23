@@ -45,6 +45,16 @@
   .box { border: 1px solid #ccc; background: #fafafa; padding: 8px 12px; margin: 10px 0; }
   .box p { margin: 4px 0 8px; }
   .box code { display: block; background: #eee; padding: 4px 8px; font: 12px Consolas, monospace; word-break: break-all; }
+  #neg-table td.grp { background: #e9eef6; font-weight: bold; }
+  #neg-table td.res { cursor: pointer; font-family: Consolas, monospace; font-size: 12px; }
+  #neg-table .why { color: #666; font-size: 12px; }
+  #neg-sum { font-weight: bold; margin-left: 10px; }
+  #neg-table tr.xrow > td { background: #fbfbfb; padding: 6px 10px 10px; }
+  .xchg { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 4px; }
+  .xchg b { display: block; margin-bottom: 2px; font-size: 12px; }
+  .xchg pre { max-height: 240px; }
+  .xrow details { margin-top: 8px; }
+  .xrow summary { cursor: pointer; color: #555; font-size: 12px; }
 </style>
 </head>
 <body>
@@ -107,12 +117,12 @@
 
 <section id="tab-insurances">
   <form id="f-insurance">
-    id <input class="n" id="i-id"> scooter_id <input class="n" id="i-scooter" list="scooterIds"> składka <input class="n" id="i-premium" value="49.99">
+    id <input class="n" id="i-id"> scooter_id <input class="n" id="i-scooter" list="scooterIds"> składka % <input class="n" id="i-rate" value="5" title="Procent kwoty każdej opłaconej płatności">
     <button>Utwórz polisę</button> <button type="button" id="r-insurances">Odśwież</button>
   </form>
-  <table><thead><tr><th>id</th><th>scooter_id</th><th>składka</th><th>status</th><th>akcje</th></tr></thead><tbody id="t-insurances"></tbody></table>
-  <h3>Pokrycie ubezpieczeniowe (powstaje ze zdarzeń płatności, składka 5%)</h3>
-  <table><thead><tr><th>payment_id</th><th>scooter_id</th><th>składka</th><th>payments_covered</th></tr></thead><tbody id="t-coverage"></tbody></table>
+  <table><thead><tr><th>id</th><th>scooter_id</th><th>składka %</th><th>status</th><th>akcje</th></tr></thead><tbody id="t-insurances"></tbody></table>
+  <h3>Pokrycie ubezpieczeniowe (powstaje ze zdarzeń płatności tylko dla hulajnóg z aktywną polisą; składka = kwota × stawka % z polisy)</h3>
+  <table><thead><tr><th>payment_id</th><th>polisa</th><th>scooter_id</th><th>stawka %</th><th>składka zł</th><th>payments_covered</th></tr></thead><tbody id="t-coverage"></tbody></table>
 </section>
 
 <section id="tab-jobs">
@@ -136,6 +146,23 @@
   </form>
 </section>
 
+<section id="tab-neg">
+  <p>Każdy test celowo robi coś źle i sprawdza, czy usługa odmówi z właściwym kodem HTTP.
+     <span class="ok">✔</span> oznacza, że system zachował się poprawnie, czyli odrzucił złe żądanie.
+     Pod każdym uruchomionym testem widać pełne zapytanie (metoda, adres, ciało JSON) i pełną odpowiedź (kod, nagłówki z bramki, ciało).
+     Kliknięcie wyniku zwija i rozwija ten podgląd.</p>
+  <p class="muted">Testy same tworzą potrzebne dane (hulajnogi „NEG-…”, polisy, płatności, zlecenia z losowymi numerami), więc pojawią się one w tabelach.
+     Testy, które opłacają płatność, zostawiają też wiadomość w kolejce floty.</p>
+  <p><button id="neg-all">▶ Uruchom wszystkie</button><span id="neg-sum"></span></p>
+  <table id="neg-table"><thead><tr><th>test</th><th>oczekiwane</th><th>wynik</th><th></th></tr></thead><tbody id="t-neg"></tbody></table>
+  <div class="box">
+    <b>Test ręczny: zależność nie działa (503)</b>
+    <p>Tego nie da się kliknąć, bo trzeba wyłączyć kontener. W katalogu lab6 wpisz poniższe polecenie, a potem utwórz polisę albo zlecenie dla istniejącej hulajnogi.
+       Insurance i Maintenance nie dostaną odpowiedzi od floty i zwrócą 503 „Scooter Service is unavailable”. Po teście włącz flotę z powrotem (<b>start</b> zamiast <b>stop</b>).</p>
+    <code>docker compose stop scooter-service</code>
+  </div>
+</section>
+
 <datalist id="scooterIds"></datalist>
 
 <h3>Wynik ostatniej akcji</h3>
@@ -156,9 +183,10 @@
 
 const SERVICES = ['SCOOTER-SERVICE', 'PAYMENT-SERVICE', 'INSURANCE-SERVICE', 'MAINTENANCE-SERVICE'];
 const QUEUES = ['scooter.payment-events', 'insurance.payment-events'];
-const TABS = [['demo', 'Scenariusz krok po kroku'], ['scooters', 'Hulajnogi'], ['payments', 'Płatności'], ['insurances', 'Ubezpieczenia'], ['jobs', 'Serwis'], ['events', 'Zdarzenia']];
+const TABS = [['demo', 'Scenariusz krok po kroku'], ['scooters', 'Hulajnogi'], ['payments', 'Płatności'], ['insurances', 'Ubezpieczenia'], ['jobs', 'Serwis'], ['events', 'Zdarzenia'], ['neg', 'Testy negatywne']];
 let activeTab = 'scooters';
 let logRows = [];
+let negTrace = null;   // podczas testu negatywnego: lista wszystkich wykonanych zapytań
 
 const $ = id => document.getElementById(id);
 const rid = () => 100000000 + Math.floor(Math.random() * 900000000);
@@ -191,6 +219,8 @@ async function call(method, path, body, silent) {
     gw: res ? (res.headers.get('X-Gateway') || '') : ''
   };
   try { out.data = JSON.parse(text); } catch (e) { /* odpowiedź nie jest JSON-em */ }
+  out.req = { method: method, path: path, body: body };
+  if (negTrace && !silent) negTrace.push(out);
   if (!silent) {
     logRows.unshift({ t: clock(), method: method, path: path, status: out.status, cache: out.cache, gw: out.gw, ms: ms, text: text });
     if (logRows.length > 300) logRows.pop();
@@ -287,7 +317,7 @@ async function loadPayments(silent) {
 async function loadInsurances(silent) {
   const r = await call('GET', '/api/insurances', undefined, silent === true);
   if (!r.ok) { if (silent !== true) flash('Lista polis', r); return; }
-  fillTable('t-insurances', r.data, ['id', 'scooter_id', 'premium', 'status'], i => [
+  fillTable('t-insurances', r.data, ['id', 'scooter_id', 'rate_percent', 'status'], i => [
     ['Anuluj', () => act('Anuluj polisę ' + i.id, 'POST', '/api/insurances/' + i.id + '/cancel', undefined, loadInsurances)],
     ['Szczegóły', () => act('Szczegóły polisy ' + i.id, 'GET', '/api/insurances/' + i.id + '/details')]
   ]);
@@ -295,7 +325,7 @@ async function loadInsurances(silent) {
 
 async function loadCoverage(silent) {
   const r = await call('GET', '/api/coverage', undefined, silent === true);
-  if (r.ok) fillTable('t-coverage', r.data, ['payment_id', 'scooter_id', 'premium', 'payments_covered']);
+  if (r.ok) fillTable('t-coverage', r.data, ['payment_id', 'insurance_id', 'scooter_id', 'rate_percent', 'premium', 'payments_covered']);
 }
 
 async function loadJobs(silent) {
@@ -406,9 +436,9 @@ function wireForms() {
   };
   $('f-insurance').onsubmit = async e => {
     e.preventDefault();
-    const id = intField('i-id', 'id'), sc = intField('i-scooter', 'scooter_id'), premium = numField('i-premium', 'składkę');
-    if (id === null || sc === null || premium === null) return;
-    await act('Utwórz polisę ' + id, 'POST', '/api/insurances', { id: id, scooter_id: sc, premium: premium }, loadInsurances);
+    const id = intField('i-id', 'id'), sc = intField('i-scooter', 'scooter_id'), rate = numField('i-rate', 'składkę w %');
+    if (id === null || sc === null || rate === null) return;
+    await act('Utwórz polisę ' + id, 'POST', '/api/insurances', { id: id, scooter_id: sc, rate_percent: rate }, loadInsurances);
     $('i-id').value = rid();
   };
   $('f-job').onsubmit = async e => {
@@ -441,7 +471,7 @@ function wireForms() {
 
 let demo = null;
 
-function makeSteps(sid, pid) {
+function makeSteps(sid, pid, pid2) {
   return [
     {
       title: 'Dodaj hulajnogę', method: 'POST', path: '/api/scooters', body: { id: sid, name: 'Demo ' + sid, model: 'Xiaomi Mi 4 Pro' },
@@ -459,6 +489,11 @@ function makeSteps(sid, pid) {
       look: 'X-Cache: HIT (trafienie): odpowiedź przyszła z pamięci podręcznej.'
     },
     {
+      title: 'Ubezpiecz hulajnogę', method: 'POST', path: '/api/insurances', body: { id: sid, scooter_id: sid, rate_percent: 5 },
+      what: 'Tworzymy polisę dla hulajnogi ' + sid + '. Insurance przez Eurekę sprawdza we flocie, czy hulajnoga istnieje. Bez aktywnej polisy płatność za tę hulajnogę nie dostałaby pokrycia ubezpieczeniowego.',
+      look: 'Status 201 i status polisy "active". Stawka 5% oznacza, że od każdej opłaconej płatności za tę hulajnogę składka wyniesie 5% kwoty. Numer polisy (' + sid + ') zobaczysz potem w rekordzie pokrycia.'
+    },
+    {
       title: 'Utwórz płatność 200 zł', method: 'POST', path: '/api/payments', body: { id: pid, scooter_id: sid, amount: 200 },
       what: 'Tworzymy płatność. Payment Service nie ma danych hulajnóg, więc przez Eurekę pyta flotę: "czy hulajnoga ' + sid + ' istnieje?". Dopiero po odpowiedzi "tak" zapisuje płatność.',
       look: 'Status 201 i status płatności "pending" (oczekuje). Żadne zdarzenie jeszcze nie zostało wysłane.'
@@ -466,7 +501,7 @@ function makeSteps(sid, pid) {
     {
       title: 'Statystyki płatności hulajnogi (przed)', method: 'GET', path: '/api/scooters/' + sid + '/payment-summary',
       what: 'Pytamy flotę, ile płatności opłacono za tę hulajnogę. Na razie nic nie opłacono.',
-      look: 'paid_payments_count: 0 i total_paid_amount: 0. Zapamiętaj to, porównamy z krokiem 8.'
+      look: 'paid_payments_count: 0 i total_paid_amount: 0. Zapamiętaj to, porównamy z krokiem 9.'
     },
     {
       title: 'Opłać płatność', method: 'POST', path: '/api/payments/' + pid + '/pay',
@@ -480,27 +515,57 @@ function makeSteps(sid, pid) {
     },
     {
       title: 'Statystyki płatności hulajnogi (po)', method: 'GET', path: '/api/scooters/' + sid + '/payment-summary',
-      what: 'Pytamy o te same statystyki co w kroku 5.',
-      look: 'Teraz paid_payments_count: 1 i total_paid_amount: 200. Między krokiem 6 a 7 flota "nie wiedziała" o płatności (spójność ostateczna). X-Cache to MISS, bo odbiór zdarzenia usunął starą kopię z Redisa.'
+      what: 'Pytamy o te same statystyki co w kroku 6.',
+      look: 'Teraz paid_payments_count: 1 i total_paid_amount: 200. Między krokiem 7 a 8 flota "nie wiedziała" o płatności (spójność ostateczna). X-Cache to MISS, bo odbiór zdarzenia usunął starą kopię z Redisa.'
     },
     {
       title: 'Insurance odbiera zdarzenie', method: 'POST', path: '/api/insurances/payment-events/consume',
-      what: 'Usługa ubezpieczeń odbiera swoją kopię tej samej wiadomości i tworzy rekord pokrycia ubezpieczeniowego.',
-      look: 'applied_events: 1. Obie plakietki kolejek są teraz na 0: jedna publikacja, dwie niezależne kopie.'
+      what: 'Usługa ubezpieczeń odbiera swoją kopię tej samej wiadomości. Hulajnoga ma aktywną polisę z kroku 4, więc powstaje rekord pokrycia ubezpieczeniowego.',
+      look: 'applied_events: 1 i uninsured_events: 0. Obie plakietki kolejek są teraz na 0: jedna publikacja, dwie niezależne kopie.'
     },
     {
       title: 'Pokrycie ubezpieczeniowe', method: 'GET', path: '/api/coverage',
       what: 'Pobieramy listę pokryć ubezpieczeniowych. Powinien na niej być rekord dla naszej płatności.',
-      look: 'Znajdź płatność ' + pid + ': składka (premium) wynosi 10, czyli 5% z 200 zł.'
+      look: 'Znajdź płatność ' + pid + ': składka (premium) wynosi 10, czyli 5% (rate_percent z polisy) z 200 zł, a insurance_id to ' + sid + ', czyli polisa z kroku 4.'
+    },
+    {
+      title: 'Anuluj polisę', method: 'POST', path: '/api/insurances/' + sid + '/cancel',
+      what: 'Teraz sprawdzimy drugą stronę reguły: co się dzieje, gdy hulajnoga nie ma aktywnej polisy. Anulujemy polisę z kroku 4.',
+      look: 'Status polisy "cancelled". Pokrycie z kroku 11 zostaje, bo powstało, kiedy polisa jeszcze była aktywna.'
+    },
+    {
+      title: 'Druga płatność 100 zł', method: 'POST', path: '/api/payments', body: { id: pid2, scooter_id: sid, amount: 100 },
+      what: 'Tworzymy drugą płatność za tę samą hulajnogę. Płatności nie obchodzi, czy hulajnoga jest ubezpieczona, sprawdza tylko, czy istnieje.',
+      look: 'Status 201 i status płatności "pending".'
+    },
+    {
+      title: 'Opłać drugą płatność', method: 'POST', path: '/api/payments/' + pid2 + '/pay',
+      what: 'Opłacamy ją. Payment znowu wrzuca zdarzenie "PaymentCompleted" do RabbitMQ, dokładnie tak samo jak w kroku 7.',
+      look: 'Status płatności "paid". Po chwili obie kolejki znowu mają po 1 wiadomości.'
+    },
+    {
+      title: 'Scooter odbiera drugie zdarzenie', method: 'POST', path: '/api/scooters/payment-events/consume',
+      what: 'Flota liczy każdą opłaconą płatność, polisa jej nie dotyczy.',
+      look: 'applied_events: 1. Statystyki hulajnogi to teraz 2 płatności i 300 zł.'
+    },
+    {
+      title: 'Insurance odbiera drugie zdarzenie', method: 'POST', path: '/api/insurances/payment-events/consume',
+      what: 'Insurance szuka aktywnej polisy dla hulajnogi ' + sid + '. Jedyna polisa jest anulowana, więc pokrycie nie powstaje. Wiadomość i tak zostaje potwierdzona (ACK), bo została poprawnie obsłużona.',
+      look: 'applied_events: 0 i uninsured_events: 1. Kolejka "insurance" wraca na 0, wiadomość nie wraca do kolejki.'
+    },
+    {
+      title: 'Pokrycie bez zmian', method: 'GET', path: '/api/coverage',
+      what: 'Jeszcze raz pobieramy listę pokryć.',
+      look: 'Płatność ' + pid + ' (200 zł) nadal ma pokrycie, ale płatności ' + pid2 + ' (100 zł) na liście nie ma: hulajnoga nie była wtedy ubezpieczona, więc nie ma składki.'
     }
   ];
 }
 
 function demoReset() {
-  const sid = rid(), pid = rid();
-  demo = { sid: sid, pid: pid, steps: makeSteps(sid, pid), results: [], done: 0, view: 0, error: null, busy: false };
+  const sid = rid(), pid = rid(), pid2 = rid();
+  demo = { sid: sid, pid: pid, steps: makeSteps(sid, pid, pid2), results: [], done: 0, view: 0, error: null, busy: false };
   renderDemo();
-  flashText('Scenariusz od nowa: hulajnoga ' + sid + ', płatność ' + pid + '.', true);
+  flashText('Scenariusz od nowa: hulajnoga ' + sid + ', płatności ' + pid + ' i ' + pid2 + '.', true);
 }
 
 function renderDemo() {
@@ -559,6 +624,217 @@ async function demoExec() {
   setTimeout(loadInfra, 6000);
 }
 
+// ---------- testy negatywne ----------
+
+// Przygotowanie danych do testu; jeśli się nie uda, test kończy się "błędem przygotowania", a nie fałszywym wynikiem.
+async function need(method, path, body) {
+  const r = await call(method, path, body);
+  if (!r.ok) throw new Error(method + ' ' + path + ' -> ' + r.status + ' ' + cut(r.text, 120));
+  return r;
+}
+async function newScooter() {
+  const id = rid();
+  await need('POST', '/api/scooters', { id: id, name: 'NEG-' + id, model: 'Test negatywny' });
+  return id;
+}
+async function newPolicy() {
+  const sid = await newScooter();
+  await need('POST', '/api/insurances', { id: sid, scooter_id: sid, rate_percent: 5 });
+  return sid;
+}
+async function newJob() {
+  const sid = await newScooter(), id = rid();
+  await need('POST', '/api/jobs', { id: id, scooter_id: sid, description: 'Test negatywny' });
+  return id;
+}
+async function newPaidPayment() {
+  const sid = await newScooter(), pid = rid();
+  await need('POST', '/api/payments', { id: pid, scooter_id: sid, amount: 50 });
+  await need('POST', '/api/payments/' + pid + '/pay');
+  return pid;
+}
+
+// expect: oczekiwany kod HTTP albo { label, check(r) } dla testów, w których liczy się treść odpowiedzi.
+const NEG = [
+  { group: 'Ubezpieczenia (Insurance)' },
+  { name: 'Polisa dla hulajnogi, której nie ma', expect: 404,
+    why: 'Insurance pyta flotę przez Eurekę, flota odpowiada 404, Insurance przekazuje 404 dalej.',
+    run: () => call('POST', '/api/insurances', { id: rid(), scooter_id: rid(), rate_percent: 5 }) },
+  { name: 'Stawka 0%', expect: 422,
+    why: 'Pydantic: rate_percent musi być większe od 0.',
+    run: () => call('POST', '/api/insurances', { id: rid(), scooter_id: 1, rate_percent: 0 }) },
+  { name: 'Stawka 150%', expect: 422,
+    why: 'Pydantic: rate_percent może wynosić najwyżej 100.',
+    run: () => call('POST', '/api/insurances', { id: rid(), scooter_id: 1, rate_percent: 150 }) },
+  { name: 'Stare pole „premium” zamiast stawki', expect: 422,
+    why: 'Brakuje wymaganego pola rate_percent.',
+    run: () => call('POST', '/api/insurances', { id: rid(), scooter_id: 1, premium: 50 }) },
+  { name: 'Druga polisa z tym samym id', expect: 409,
+    why: 'Numer polisy musi być unikalny.',
+    run: async () => { const id = await newPolicy(); return call('POST', '/api/insurances', { id: id, scooter_id: id, rate_percent: 5 }); } },
+  { name: 'Anulowanie już anulowanej polisy', expect: 409,
+    why: 'Polisy anulowanej nie da się anulować drugi raz.',
+    run: async () => { const id = await newPolicy(); await need('POST', '/api/insurances/' + id + '/cancel'); return call('POST', '/api/insurances/' + id + '/cancel'); } },
+  { name: 'Polisa, której nie ma', expect: 404,
+    why: 'GET nieistniejącego numeru polisy.',
+    run: () => call('GET', '/api/insurances/' + rid()) },
+  { name: 'Płatność bez polisy nie dostaje pokrycia', main: 2, expect: { label: '200, uninsured ≥ 1, brak rekordu', check: r => r.ok && r.extra.uninsured >= 1 && !r.data.some(c => c.payment_id === r.extra.pid) },
+    why: 'Hulajnoga bez polisy, opłacona płatność, Insurance odbiera zdarzenie: ACK, ale żadnego pokrycia.',
+    run: async () => {
+      const pid = await newPaidPayment();
+      const c = await need('POST', '/api/insurances/payment-events/consume');
+      const r = await call('GET', '/api/coverage');
+      r.extra = { pid: pid, uninsured: c.data ? c.data.uninsured_events : 0 };
+      return r;
+    } },
+
+  { group: 'Serwis (Maintenance)' },
+  { name: 'Zlecenie dla hulajnogi, której nie ma', expect: 404,
+    why: 'Maintenance pyta flotę przez Eurekę, flota odpowiada 404.',
+    run: () => call('POST', '/api/jobs', { id: rid(), scooter_id: rid(), description: 'Test' }) },
+  { name: 'Pusty opis zlecenia', expect: 422,
+    why: 'Pydantic: opis musi mieć od 1 do 500 znaków.',
+    run: () => call('POST', '/api/jobs', { id: rid(), scooter_id: 1, description: '' }) },
+  { name: 'Drugie zlecenie z tym samym id', expect: 409,
+    why: 'Numer zlecenia musi być unikalny.',
+    run: async () => { const id = await newJob(); return call('POST', '/api/jobs', { id: id, scooter_id: 1, description: 'Duplikat' }); } },
+  { name: 'Zakończenie bez rozpoczęcia', expect: 409,
+    why: 'Maszyna stanów: z "pending" można tylko wystartować, nie zakończyć.',
+    run: async () => { const id = await newJob(); return call('POST', '/api/jobs/' + id + '/complete'); } },
+  { name: 'Start dwa razy', expect: 409,
+    why: 'Zlecenie "in_progress" nie może wystartować ponownie.',
+    run: async () => { const id = await newJob(); await need('POST', '/api/jobs/' + id + '/start'); return call('POST', '/api/jobs/' + id + '/start'); } },
+  { name: 'Start po zakończeniu', expect: 409,
+    why: '"completed" to stan końcowy, z niego nie ma już przejść.',
+    run: async () => {
+      const id = await newJob();
+      await need('POST', '/api/jobs/' + id + '/start');
+      await need('POST', '/api/jobs/' + id + '/complete');
+      return call('POST', '/api/jobs/' + id + '/start');
+    } },
+  { name: 'Zlecenie, którego nie ma', expect: 404,
+    why: 'GET nieistniejącego numeru zlecenia.',
+    run: () => call('GET', '/api/jobs/' + rid()) },
+
+  { group: 'Pozostałe usługi i bramka' },
+  { name: 'Płatność za hulajnogę, której nie ma', expect: 404,
+    why: 'Payment sprawdza hulajnogę we flocie przez Eurekę.',
+    run: () => call('POST', '/api/payments', { id: rid(), scooter_id: rid(), amount: 50 }) },
+  { name: 'Ujemna kwota płatności', expect: 422,
+    why: 'Pydantic: kwota musi być większa od 0.',
+    run: () => call('POST', '/api/payments', { id: rid(), scooter_id: 1, amount: -10 }) },
+  { name: 'Opłacenie płatności drugi raz', expect: 409,
+    why: 'Płatność "paid" nie może być opłacona ponownie (i nie wyśle drugiego zdarzenia).',
+    run: async () => { const pid = await newPaidPayment(); return call('POST', '/api/payments/' + pid + '/pay'); } },
+  { name: 'Wypożyczenie wypożyczonej hulajnogi', expect: 409,
+    why: 'Flota: hulajnoga "rented" nie może być wypożyczona drugi raz.',
+    run: async () => { const id = await newScooter(); await need('POST', '/api/scooters/' + id + '/rent'); return call('POST', '/api/scooters/' + id + '/rent'); } },
+  { name: 'Nieznana ścieżka w bramce', expect: 404,
+    why: 'Żadna trasa w API Gateway nie pasuje do tego adresu.',
+    run: () => call('GET', '/api/nie-ma-takiej-sciezki') }
+];
+
+function negExpectLabel(t) { return typeof t.expect === 'number' ? String(t.expect) : t.expect.label; }
+
+function renderNeg() {
+  const tb = $('t-neg');
+  tb.replaceChildren();
+  NEG.forEach((t, i) => {
+    const tr = el('tr');
+    if (t.group) {
+      const td = el('td', t.group, 'grp'); td.colSpan = 4; tr.append(td); tb.append(tr); return;
+    }
+    const name = el('td', t.name); name.append(el('div', t.why, 'why'));
+    const res = el('td', '', 'res'); res.id = 'neg-res-' + i;
+    const btn = el('button', 'Uruchom'); btn.id = 'neg-btn-' + i; btn.onclick = () => runNeg(i);
+    const bt = el('td'); bt.append(btn);
+    tr.append(name, el('td', negExpectLabel(t)), res, bt);
+    // Wiersz pod testem: pełne zapytanie i odpowiedź (widoczny po uruchomieniu testu).
+    const xr = el('tr', null, 'xrow'); xr.id = 'neg-x-' + i; xr.hidden = true;
+    const xd = el('td'); xd.colSpan = 4; xd.id = 'neg-xd-' + i; xr.append(xd);
+    tb.append(tr, xr);
+  });
+}
+
+// Zapytanie (metoda, adres, ciało JSON) obok odpowiedzi (kod HTTP, nagłówki z bramki, ciało).
+function exchangeBox(r) {
+  const box = el('div', null, 'xchg');
+  const q = el('div'), a = el('div');
+  q.append(el('b', 'Zapytanie'), el('pre',
+    r.req.method + ' ' + r.req.path + '\n' +
+    (r.req.body === undefined ? '\n(bez ciała)' : 'Content-Type: application/json\n\n' + JSON.stringify(r.req.body, null, 2))));
+  a.append(el('b', 'Odpowiedź'), el('pre',
+    'HTTP ' + (r.status || 'ERR') + (r.gw ? '\nX-Gateway: ' + r.gw : '') + (r.cache ? '\nX-Cache: ' + r.cache : '') +
+    '\n\n' + (r.text ? pretty(r.text) : '(puste ciało)')));
+  box.append(q, a);
+  return box;
+}
+
+// Ostatnie zapytanie (albo `main` ostatnich) to właściwy test; wcześniejsze to przygotowanie danych (zwinięte).
+function renderTrace(i, trace) {
+  const xd = $('neg-xd-' + i);
+  xd.replaceChildren();
+  if (!trace.length) { xd.append(el('span', '(brak zapytań)', 'muted')); }
+  else {
+    const m = Math.min(NEG[i].main || 1, trace.length);
+    const mains = trace.slice(-m), prep = trace.slice(0, -m);
+    mains.forEach((r, k) => {
+      xd.append(el('b', m > 1 ? 'Zapytanie testowe ' + (k + 1) + ' z ' + m + ': ' + r.req.method + ' ' + r.req.path : 'Zapytanie testowe'), exchangeBox(r));
+    });
+    if (prep.length) {
+      const det = el('details');
+      det.append(el('summary', 'Przygotowanie danych: ' + prep.length + ' zapytań wcześniej (kliknij, żeby rozwinąć)'));
+      prep.forEach((p, k) => { det.append(el('div', (k + 1) + '. ' + p.req.method + ' ' + p.req.path + ' -> ' + p.status, 'mono'), exchangeBox(p)); });
+      xd.append(det);
+    }
+  }
+  $('neg-x-' + i).hidden = false;
+}
+
+async function runNeg(i) {
+  const t = NEG[i], cell = $('neg-res-' + i), btn = $('neg-btn-' + i);
+  btn.disabled = true;
+  cell.textContent = '…'; cell.className = 'res muted'; cell.onclick = null;
+  let pass = false;
+  negTrace = [];
+  try {
+    const r = await t.run();
+    pass = typeof t.expect === 'number' ? r.status === t.expect : t.expect.check(r);
+    let msg = r.status + ' ' + cut(r.text, 90);
+    if (r.extra) msg = r.status + ', uninsured_events: ' + r.extra.uninsured + ', płatność ' + r.extra.pid + (r.data && r.data.some(c => c.payment_id === r.extra.pid) ? ' MA pokrycie' : ' bez pokrycia');
+    cell.textContent = (pass ? '✔ ' : '✘ ') + msg;
+    cell.className = 'res ' + (pass ? 'ok' : 'err');
+    flashText('Test: ' + t.name + ' -> ' + (pass ? 'OK' : 'NIE OK') + ' (' + r.status + ')', pass);
+  } catch (e) {
+    cell.textContent = '✘ błąd przygotowania: ' + e.message;
+    cell.className = 'res err';
+    flashText('Test: ' + t.name + ' -> nie udało się przygotować danych', false);
+  }
+  renderTrace(i, negTrace);
+  negTrace = null;
+  cell.title = 'Kliknij, żeby zwinąć lub rozwinąć zapytanie i odpowiedź';
+  cell.onclick = () => { const x = $('neg-x-' + i); x.hidden = !x.hidden; };
+  btn.disabled = false;
+  loadInfra();
+  return pass;
+}
+
+async function runAllNeg() {
+  const all = $('neg-all');
+  all.disabled = true;
+  let ok = 0, n = 0;
+  for (let i = 0; i < NEG.length; i++) {
+    if (NEG[i].group) continue;
+    n++;
+    $('neg-sum').textContent = 'Test ' + n + '…';
+    if (await runNeg(i)) ok++;
+  }
+  $('neg-sum').textContent = ok + ' z ' + n + ' OK';
+  $('neg-sum').className = ok === n ? 'ok' : 'err';
+  flashText('Testy negatywne: ' + ok + ' z ' + n + ' OK', ok === n);
+  all.disabled = false;
+}
+
 // ---------- start ----------
 
 function init() {
@@ -576,6 +852,8 @@ function init() {
   for (const id of ['s-id', 'p-id', 'i-id', 'j-id']) $(id).value = rid();
 
   wireForms();
+  renderNeg();
+  $('neg-all').onclick = runAllNeg;
   const fromUrl = location.hash.slice(1);   // np. http://127.0.0.1:8090/#payments otwiera zakładkę Płatności
   demoReset();
   showTab(TABS.some(t => t[0] === fromUrl) ? fromUrl : 'demo');

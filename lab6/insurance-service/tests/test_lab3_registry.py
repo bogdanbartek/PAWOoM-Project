@@ -26,7 +26,7 @@ def test_create_insurance_discovers_scooter_service_by_name():
     response, _, insurances = run(fake, "POST", "/insurances", json=insurance_body())
 
     assert response.status_code == 201
-    assert response.json() == {"id": 1, "scooter_id": 1, "premium": 50.0, "status": "active"}
+    assert response.json() == {"id": 1, "scooter_id": 1, "rate_percent": 5.0, "status": "active"}
     assert fake.calls == [("SCOOTER-SERVICE", "/scooters/1", "json", 3)]
     assert insurances == [response.json()]
     assert fake.starts == fake.stops == 1
@@ -69,7 +69,7 @@ def test_insurance_details_reads_current_scooter_from_dependency(client, eureka_
 
     assert response.status_code == 200
     assert response.json() == {
-        "insurance": {"id": 1, "scooter_id": 1, "premium": 50.0, "status": "active"},
+        "insurance": {"id": 1, "scooter_id": 1, "rate_percent": 5.0, "status": "active"},
         "scooter": {**SCOOTER, "status": "rented"},
     }
 

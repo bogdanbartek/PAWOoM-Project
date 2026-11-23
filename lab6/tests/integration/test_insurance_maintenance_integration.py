@@ -55,6 +55,16 @@ def create_scooter(client) -> int:
     return scooter_id
 
 
+def create_policy(client, scooter_id: int) -> int:
+    """Pokrycie ze zdarzenia powstaje tylko dla hulajnogi z aktywną polisą."""
+    insurance_id = unique_id()
+    response = client.post(
+        "/api/insurances", json={"id": insurance_id, "scooter_id": scooter_id, "rate_percent": 5.0}
+    )
+    assert response.status_code == 201, response.text
+    return insurance_id
+
+
 def coverage_for(client, payment_id: int) -> list[dict]:
     response = client.get("/api/coverage")
     assert response.status_code == 200
@@ -69,14 +79,14 @@ def test_insurance_created_and_details_read_scooter_through_eureka(client):
     insurance_id = unique_id()
 
     created = client.post(
-        "/api/insurances", json={"id": insurance_id, "scooter_id": scooter_id, "premium": 49.99}
+        "/api/insurances", json={"id": insurance_id, "scooter_id": scooter_id, "rate_percent": 5.0}
     )
     details = client.get(f"/api/insurances/{insurance_id}/details")
 
     assert created.status_code == 201, created.text
     assert created.headers["x-gateway"] == "lab4"
     assert created.json() == {
-        "id": insurance_id, "scooter_id": scooter_id, "premium": 49.99, "status": "active"
+        "id": insurance_id, "scooter_id": scooter_id, "rate_percent": 5.0, "status": "active"
     }
     assert details.status_code == 200
     body = details.json()
@@ -90,7 +100,7 @@ def test_insurance_for_missing_scooter_returns_404_and_stores_nothing(client):
     insurance_id = unique_id()
 
     response = client.post(
-        "/api/insurances", json={"id": insurance_id, "scooter_id": unique_id(), "premium": 10}
+        "/api/insurances", json={"id": insurance_id, "scooter_id": unique_id(), "rate_percent": 10}
     )
 
     assert response.status_code == 404
@@ -103,15 +113,15 @@ def test_insurance_cancel_rule_and_validation(client):
     scooter_id = create_scooter(client)
     insurance_id = unique_id()
     assert client.post(
-        "/api/insurances", json={"id": insurance_id, "scooter_id": scooter_id, "premium": 20}
+        "/api/insurances", json={"id": insurance_id, "scooter_id": scooter_id, "rate_percent": 20}
     ).status_code == 201
 
     cancelled = client.post(f"/api/insurances/{insurance_id}/cancel")
     again = client.post(f"/api/insurances/{insurance_id}/cancel")
     duplicate = client.post(
-        "/api/insurances", json={"id": insurance_id, "scooter_id": scooter_id, "premium": 20}
+        "/api/insurances", json={"id": insurance_id, "scooter_id": scooter_id, "rate_percent": 20}
     )
-    invalid = client.post("/api/insurances", json={"id": unique_id(), "scooter_id": scooter_id, "premium": -5})
+    invalid = client.post("/api/insurances", json={"id": unique_id(), "scooter_id": scooter_id, "rate_percent": -5})
 
     assert cancelled.status_code == 200 and cancelled.json()["status"] == "cancelled"
     assert again.status_code == 409
@@ -173,6 +183,7 @@ def test_job_for_missing_scooter_returns_404_and_missing_job_404(client):
 
 def test_pay_fans_out_to_both_queues_and_each_consumer_applies_it(client, clean_queues):
     scooter_id = create_scooter(client)
+    insurance_id = create_policy(client, scooter_id)
     payment_id = unique_id()
     assert client.post(
         "/api/payments", json={"id": payment_id, "scooter_id": scooter_id, "amount": 200.0}
@@ -199,12 +210,15 @@ def test_pay_fans_out_to_both_queues_and_each_consumer_applies_it(client, clean_
     records = coverage_for(client, payment_id)
     assert len(records) == 1
     assert records[0]["scooter_id"] == scooter_id
+    assert records[0]["insurance_id"] == insurance_id
+    assert records[0]["rate_percent"] == 5.0  # stawka z polisy
     assert records[0]["premium"] == 10.0  # 5% z 200.0
     assert queue_depth(SCOOTER_QUEUE) == 0 and queue_depth(INSURANCE_QUEUE) == 0
 
 
 def test_insurance_consumer_is_idempotent(client, clean_queues):
     scooter_id = create_scooter(client)  # istniejąca hulajnoga, bo zdarzenie trafi też do kolejki floty
+    create_policy(client, scooter_id)
     payment_id = unique_id()
     event = {
         "event_id": f"evt-it-{uuid.uuid4().hex[:12]}",

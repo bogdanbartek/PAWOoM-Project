@@ -1219,7 +1219,7 @@ Plan projektu (sekcja 1) zakładał cztery usługi: flotę, płatności, ubezpie
 
 | Usługa | Odpowiedzialność | Właściciel danych | Nazwa w Eurece | Port |
 |---|---|---|---|---:|
-| Insurance Service (`insurance-service/`) | Polisy ubezpieczeniowe hulajnóg oraz automatyczne rekordy pokrycia tworzone ze zdarzeń płatności | Polisy (`id`, `scooter_id`, `premium`, `status`) i rekordy pokrycia — w pamięci procesu | `INSURANCE-SERVICE` | 8103 |
+| Insurance Service (`insurance-service/`) | Polisy ubezpieczeniowe hulajnóg oraz automatyczne rekordy pokrycia tworzone ze zdarzeń płatności | Polisy (`id`, `scooter_id`, `rate_percent`, `status`) i rekordy pokrycia — w pamięci procesu | `INSURANCE-SERVICE` | 8103 |
 | Maintenance Service (`maintenance-service/`) | Zlecenia serwisowe i ich cykl życia | Zlecenia (`id`, `scooter_id`, `description`, `status`) — w pamięci procesu | `MAINTENANCE-SERVICE` | 8104 |
 
 **Granice:** żadna z usług nie ma dostępu do bazy ani Redisa floty i nie zmienia statusu hulajnogi. Trzymają tylko odniesienie `scooter_id`, a aktualne dane hulajnogi czytają przez `GET /scooters/{id}` (`do_service("SCOOTER-SERVICE", ..., timeout=3)`, błędy mapowane tak jak w sekcji 15).
@@ -1230,17 +1230,17 @@ Plan projektu (sekcja 1) zakładał cztery usługi: flotę, płatności, ubezpie
 |---|---|---|
 | `GET /health` | Proces żyje | 200 |
 | `GET /insurances`, `GET /insurances/{id}` | Lista i szczegóły polis | 200, 404 |
-| `POST /insurances` | Polisa `{"id", "scooter_id", "premium"}`. **Wywołuje `SCOOTER-SERVICE`.** | 201, 404, 409, 422, 502, 503 |
+| `POST /insurances` | Polisa `{"id", "scooter_id", "rate_percent"}` (stawka składki w % płatności). **Wywołuje `SCOOTER-SERVICE`.** | 201, 404, 409, 422, 502, 503 |
 | `POST /insurances/{id}/cancel` | Anulowanie: tylko z `active` do `cancelled` | 200, 404, 409 |
 | `GET /insurances/{id}/details` | Polisa z **aktualnymi** danymi hulajnogi. **Wywołuje `SCOOTER-SERVICE`.** | 200, 404, 502, 503 |
 | `GET /coverage` | Rekordy pokrycia utworzone ze zdarzeń | 200 |
 | `POST /insurances/payment-events/consume` | Pobiera do 50 wiadomości z kolejki i tworzy pokrycie | 200, 422, 503 |
 
-Walidacja: `id > 0`, `scooter_id > 0`, `0 < premium ≤ 5000`. Polisę można anulować tylko raz (drugi raz `409 {"detail": "Insurance is already cancelled"}`). Błędne dane dają `422` bez wywołania zależności.
+Walidacja: `id > 0`, `scooter_id > 0`, `0 < rate_percent ≤ 100`. Polisę można anulować tylko raz (drugi raz `409 {"detail": "Insurance is already cancelled"}`). Błędne dane dają `422` bez wywołania zależności.
 
-**Dwa różne pojęcia, które łatwo pomylić.** *Polisa* (`/insurances`) jest tworzona ręcznie przez klienta, a składkę podaje klient. *Rekord pokrycia* (`/coverage`) powstaje **automatycznie** ze zdarzenia `PaymentCompleted`, a składka to 5% kwoty płatności (`premium = round(amount × 0.05, 2)`). To dwie osobne kolekcje i nie są ze sobą powiązane.
+**Dwa różne pojęcia, które łatwo pomylić.** *Polisa* (`/insurances`) jest tworzona ręcznie przez klienta i określa stawkę składki w procentach (`rate_percent`, np. `5` = 5%). *Rekord pokrycia* (`/coverage`) powstaje **automatycznie** ze zdarzenia `PaymentCompleted`, a składka w PLN to stawka polisy od kwoty płatności (`premium = round(amount × rate_percent / 100, 2)`; rekord przechowuje też użytą `rate_percent`). Pokrycie powstaje **tylko dla hulajnogi z aktywną polisą** (stan w chwili odbioru zdarzenia) i wskazuje ją w polu `insurance_id`; przy kilku aktywnych polisach wybierana jest ta o najmniejszym `id`. Płatność za hulajnogę bez polisy (lub z polisą anulowaną) jest potwierdzana (ACK) i liczona jako `uninsured_events`, a rekord pokrycia nie powstaje.
 
-**Konsument zdarzenia** (`app/events.py`, `app/main.py`): kolejka `insurance.payment-events` (`durable`), wiązana z exchange `pawoom.events` kluczem `payment.completed` w `lifespan`. Zasady są takie same jak w usłudze floty (sekcja 28): Tolerant Reader (`parse_payment_completed`), `basic_get(auto_ack=False)`, ACK po przetworzeniu, `basic_nack(requeue=True)` i `422` przy błędnym zdarzeniu, `503` przy niedostępnym brokerze. Idempotentność: zbiór `processed_events` (po `event_id`), a dodatkowo rekord pokrycia jest kluczowany po `payment_id`, więc ta sama płatność nie utworzy dwóch rekordów. Odpowiedź `consume` zawiera `consumed_messages`, `applied_events`, `duplicate_events`, `ignored_events` i `total_coverage_records`.
+**Konsument zdarzenia** (`app/events.py`, `app/main.py`): kolejka `insurance.payment-events` (`durable`), wiązana z exchange `pawoom.events` kluczem `payment.completed` w `lifespan`. Zasady są takie same jak w usłudze floty (sekcja 28): Tolerant Reader (`parse_payment_completed`), `basic_get(auto_ack=False)`, ACK po przetworzeniu, `basic_nack(requeue=True)` i `422` przy błędnym zdarzeniu, `503` przy niedostępnym brokerze. Idempotentność: zbiór `processed_events` (po `event_id`), a dodatkowo rekord pokrycia jest kluczowany po `payment_id`, więc ta sama płatność nie utworzy dwóch rekordów. Odpowiedź `consume` zawiera `consumed_messages`, `applied_events`, `duplicate_events`, `ignored_events`, `uninsured_events` i `total_coverage_records`.
 
 ### Maintenance Service
 
@@ -1271,7 +1271,7 @@ Producent (Payment Service) publikuje `PaymentCompleted` **raz**, z kluczem `pay
 ```
                                                   ┌─► kolejka scooter.payment-events    ─► SCOOTER-SERVICE   (statystyki hulajnogi)
 PAYMENT-SERVICE ─ publish payment.completed ─► exchange pawoom.events (topic)
-                                                  └─► kolejka insurance.payment-events  ─► INSURANCE-SERVICE (pokrycie, składka 5%)
+                                                  └─► kolejka insurance.payment-events  ─► INSURANCE-SERVICE (pokrycie, składka = stawka % z polisy)
 ```
 
 Dodanie konsumenta nie wymagało żadnej zmiany w producencie. To praktyczne zastosowanie uzasadnienia z sekcji 27, dlaczego exchange jest typu `topic`.
@@ -1324,7 +1324,7 @@ Wykonano 2026-11-17: Windows 11, Python 3.14, Redis 7, RabbitMQ 3.13 i Eureka w 
 | `test_insurance_cancel_rule_and_validation` | `cancel` raz `200`, drugi raz `409`, duplikat `409`, `422` dla ujemnej składki |
 | `test_job_state_machine_through_gateway` | pełna maszyna stanów, `409` przy złej kolejności, stan bez zmian po odrzuceniu |
 | `test_job_for_missing_scooter_returns_404_and_missing_job_404` | `404` dla nieistniejącej hulajnogi i zlecenia, `422` dla błędnych danych |
-| `test_pay_fans_out_to_both_queues_and_each_consumer_applies_it` | jedna publikacja, dwie kolejki, niezależny odbiór, składka 5% |
+| `test_pay_fans_out_to_both_queues_and_each_consumer_applies_it` | jedna publikacja, dwie kolejki, niezależny odbiór, składka 5% (stawka polisy) |
 | `test_insurance_consumer_is_idempotent` | duplikat `event_id` zastosowany raz |
 | `test_rejected_pay_publishes_to_neither_queue` | `409`/`404` nie publikują do żadnej kolejki |
 
@@ -1335,7 +1335,7 @@ Wykonano 2026-11-17: Windows 11, Python 3.14, Redis 7, RabbitMQ 3.13 i Eureka w 
 - **Starsze testy zostawiają zdarzenia w kolejce ubezpieczeń.** `test_async_integration.py` konsumuje tylko kolejkę floty, a każde `pay` trafia też do kolejki ubezpieczeń (po serii testów było tam 4 zaległe wiadomości). Nowe testy opróżniają obie kolejki na starcie.
 - **Konsumpcja jest ręczna** (`POST .../consume`), jak w usłudze floty, więc pokrycie powstaje dopiero po wywołaniu endpointu.
 - **Serwis nie zmienia statusu hulajnogi.** Maintenance Service tylko potwierdza, że hulajnoga istnieje. Status `maintenance` w usłudze floty nadal nie ma operacji, która do niego prowadzi, więc hulajnogę w serwisie można wypożyczyć.
-- **Polisa i pokrycie nie są powiązane.** Usługa floty nie sprawdza ubezpieczenia przy wypożyczeniu, a `payments_covered` w rekordzie pokrycia zawsze ma wartość `1`, bo rekord powstaje raz na płatność.
+- **Polisa jest sprawdzana dopiero przy odbiorze zdarzenia.** Jeśli polisa powstanie po przetworzeniu płatności, pokrycie nie powstaje wstecz (zdarzenie jest już potwierdzone i zapamiętane jako przetworzone). Usługa floty nie sprawdza ubezpieczenia przy wypożyczeniu, a `payments_covered` w rekordzie pokrycia zawsze ma wartość `1`, bo rekord powstaje raz na płatność.
 - **Pozostałe ograniczenia** (opóźnienie rejestru, brak DLQ, brak uwierzytelniania, brak publisher confirms) są takie same jak w sekcjach 17, 22 i 31.
 
 ---
@@ -1352,7 +1352,7 @@ Sekcje 1–34 opisują LAB1–LAB5. W LAB6 **kod usług, reguły biznesowe i kon
 |---|---|---|---|
 | Scooter Rental Service (usługa 1) | Oscar Borowiec (131409) | Hulajnoga (`id`, `name`, `model`, `status`), statystyki płatności hulajnogi, identyfikatory przetworzonych zdarzeń | SQLite na wolumenie, cache w Redis |
 | Payment Service (usługa 2) | Oscar Borowiec (131409) | Płatność (`id`, `scooter_id`, `amount`, `status`) | pamięć procesu |
-| Insurance Service (usługa 3) | Bartłomiej Bogdan (131407) | Polisa (`id`, `scooter_id`, `premium`, `status`), rekord pokrycia (tworzony ze zdarzenia `PaymentCompleted`) | pamięć procesu |
+| Insurance Service (usługa 3) | Bartłomiej Bogdan (131407) | Polisa (`id`, `scooter_id`, `rate_percent`, `status`), rekord pokrycia (tworzony ze zdarzenia `PaymentCompleted`) | pamięć procesu |
 | Maintenance Service (usługa 4) | Bartłomiej Bogdan (131407) | Zlecenie serwisowe (`id`, `scooter_id`, `description`, `status`) | pamięć procesu |
 
 - **Skonteneryzowane komponenty (8 kontenerów):** `eureka`, `redis`, `rabbitmq`, `scooter-service`, `payment-service`, `insurance-service`, `maintenance-service`, `api-gateway`.

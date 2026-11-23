@@ -35,7 +35,7 @@ def test_empty_list_on_startup(client):
 def test_create_then_read(client, eureka_fake):
     created = client.post("/insurances", json=insurance_body())
     assert created.status_code == 201
-    assert created.json() == {"id": 1, "scooter_id": 1, "premium": 50.0, "status": "active"}
+    assert created.json() == {"id": 1, "scooter_id": 1, "rate_percent": 5.0, "status": "active"}
 
     detail = client.get("/insurances/1")
     assert detail.status_code == 200
@@ -51,17 +51,17 @@ def test_not_found_returns_404(client):
 
 
 def test_invalid_body_returns_422(client):
-    bad = client.post("/insurances", json={"id": 0, "scooter_id": 1, "premium": 50.0})
+    bad = client.post("/insurances", json={"id": 0, "scooter_id": 1, "rate_percent": 5.0})
     assert bad.status_code == 422
     assert client.get("/insurances").json() == []  # stan bez zmian
 
 
 def test_duplicate_id_returns_409_keeps_original(client, eureka_fake):
-    client.post("/insurances", json=insurance_body(premium=50.0))
-    duplicate = client.post("/insurances", json=insurance_body(premium=99.0))
+    client.post("/insurances", json=insurance_body(rate_percent=5.0))
+    duplicate = client.post("/insurances", json=insurance_body(rate_percent=9.0))
     assert duplicate.status_code == 409
     assert duplicate.json() == {"detail": "Insurance with this ID already exists"}
-    assert client.get("/insurances/1").json()["premium"] == 50.0
+    assert client.get("/insurances/1").json()["rate_percent"] == 5.0
     # duplikat odrzucony przed wywołaniem Eureki (drugi raz)
     assert len(eureka_fake.calls) == 1
 
